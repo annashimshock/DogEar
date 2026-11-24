@@ -23,9 +23,9 @@ export const THEMES = [
     description: 'Neutral dark placeholder default. Replace with your own theme.',
   },
   {
-    id: 'paper',
-    label: 'Paper',
-    description: 'Light example theme showing the token contract. Replace or delete.',
+    id: 'dogear',
+    label: 'DogEar',
+    description: "Warm, editorial light theme — the app's primary identity.",
   },
 ] as const
 
