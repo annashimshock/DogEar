@@ -20,6 +20,7 @@ import {
   X,
 } from 'lucide-react'
 import { BookCard } from '../../../components/books/BookCard'
+import { useBookDetails } from '../../../components/books/BookDetailsContext'
 import { BookCover } from '../../../components/books/BookCover'
 import { Button, ConfirmModal, Textarea, cn, useToast } from '../../../components/ui'
 import type { Book } from '../../../lib/books'
@@ -180,6 +181,7 @@ export default function ForYouPage() {
   const { userId } = useAuth()
   const ownerId = userId ?? '__anonymous__'
   const { success, error: notifyError } = useToast()
+  const { openDetails } = useBookDetails()
 
   const saved = useSavedBooks()
   const interactions = useBookInteractions()
@@ -281,6 +283,9 @@ export default function ForYouPage() {
       setPersonalLoading(false)
       return
     }
+    // Wait for both owned collections before building a profile. The worker
+    // reloads them too, but this avoids a needless starter request on mount.
+    if (saved.loading || interactions.loading) return
     let cancelled = false
     setPersonalLoading(true)
     setPersonalError('')
@@ -314,7 +319,7 @@ export default function ForYouPage() {
       cancelled = true
     }
     // preferenceKey reflects the actual library/swipe content, not just identity.
-  }, [userId, preferenceKey, refreshCount])
+  }, [userId, preferenceKey, refreshCount, saved.loading, interactions.loading])
 
   async function ask(question: string) {
     const message = question.trim()
@@ -489,9 +494,13 @@ export default function ForYouPage() {
                       {turn.books.length > 0 && (
                         <div className="mt-2 space-y-1.5" data-testid="chat-recommendations">
                           {turn.books.map((book) => (
-                            <div
+                            <button
                               key={`${book.source}:${book.sourceId}`}
-                              className="flex gap-2.5 rounded-md border border-border bg-background p-2 text-left"
+                              type="button"
+                              data-testid="chat-book-details"
+                              aria-label={`View details for ${book.title}`}
+                              onClick={() => openDetails(book)}
+                              className="flex w-full gap-2.5 rounded-md border border-border bg-background p-2 text-left transition-colors hover:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                             >
                               <div className="w-10 shrink-0">
                                 <BookCover book={book} />
@@ -509,7 +518,7 @@ export default function ForYouPage() {
                                   </p>
                                 )}
                               </div>
-                            </div>
+                            </button>
                           ))}
                         </div>
                       )}
@@ -637,6 +646,7 @@ export default function ForYouPage() {
                     key={`${book.source}:${book.sourceId}`}
                     book={book}
                     reason={book.reason}
+                    onOpenDetails={openDetails}
                   />
                 ))}
               </div>

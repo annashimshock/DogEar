@@ -12,11 +12,17 @@ const FULL_DESCRIPTION =
   'It follows an archivist through forgotten letters, a rain-soaked coastal town, and the quiet decisions ' +
   'that turn a stack of paper into a family history.'
 
+// A fresh work each run keeps signed-in swipe queues independent of earlier
+// test data saved to the same test account.
+const RUN_ID = Math.random().toString(36).slice(2, 9)
+
 const DETAIL_BOOK = {
   source: 'google_books',
-  sourceId: 'book-details-test-work',
+  sourceId: `book-details-test-work-${RUN_ID}`,
+  // Keep the curated title so the front-table swipe query accepts it; the
+  // unique author makes it a different work from earlier test runs.
   title: 'The Silent Patient',
-  authors: ['Alex Michaelides'],
+  authors: [`Alex Michaelides ${RUN_ID}`],
   description: FULL_DESCRIPTION,
   categories: ['Fiction', ' Literary Fiction', 'Book Club'],
   publishedDate: '2024-05-18',
@@ -53,7 +59,7 @@ test.describe('book details modal', () => {
 
     const modal = page.getByTestId('book-details-modal')
     await expect(page.getByTestId('book-details-title')).toHaveText(DETAIL_BOOK.title)
-    await expect(page.getByTestId('book-details-authors')).toHaveText('Alex Michaelides')
+    await expect(page.getByTestId('book-details-authors')).toHaveText(DETAIL_BOOK.authors[0])
     await expect(page.getByTestId('book-details-description')).toHaveText(FULL_DESCRIPTION)
     await expect(page.getByTestId('book-details-metadata')).toContainText('DogEar Press')
     await expect(page.getByTestId('book-details-metadata')).toContainText('344')
@@ -152,8 +158,10 @@ test.describe('book details library actions', () => {
     await page.getByTestId('book-details-close').click()
     await page.getByRole('link', { name: /My Library/i }).click()
     await page.getByRole('tab', { name: /^Read/ }).click()
-    await expect(
-      page.getByRole('tabpanel', { name: /^Read/ }).getByRole('heading', { name: DETAIL_BOOK.title }),
-    ).toBeVisible()
+    const savedCard = page
+      .getByRole('tabpanel', { name: /^Read/ })
+      .getByRole('article')
+      .filter({ hasText: DETAIL_BOOK.authors[0] })
+    await expect(savedCard.getByRole('heading', { name: DETAIL_BOOK.title })).toBeVisible()
   })
 })

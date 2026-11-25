@@ -101,6 +101,8 @@ function categorySegments(book: Book): string[] {
 const EDITION_NOISE = [
   /\([^)]*\)/g,
   /\[[^\]]*\]/g,
+  /#\s*\d+\b/g,
+  /\b(?:book|vol(?:ume)?|part|no\.?)\s*#?\d+(?:\s*of\s*\d+)?\b/gi,
   /\bhard\s?cover\b/gi,
   /\bpaper\s?back\b/gi,
   /\be\s?books?\b/gi,
@@ -153,10 +155,14 @@ function titleCandidates(book: Book): string[] {
   for (const segment of book.title.split(/[/;]/).slice(1)) add(segment)
   for (const match of book.title.matchAll(/\(([^)]*)\)/g)) {
     const inner = match[1]
-    if (/[,\/]/.test(inner) || /\b(?:collection|boxed|box|set|series|omnibus)\b/i.test(inner)) {
-      continue
-    }
-    add(inner)
+    // A parenthetical list of several books is a collection, not an alias for
+    // one of its titles. A single translated/alternate title (possibly followed
+    // by a series number) is.
+    if (/\b(?:collection|boxed|box|set|series|omnibus)\b/i.test(inner)) continue
+    const segments = inner.split(/[,/]/).map((segment) => primaryTitle(segment))
+    const meaningful = segments.filter((segment) => segment.length > 1)
+    if (meaningful.length > 1) continue
+    for (const segment of segments) add(segment)
   }
   return [...candidates]
 }
@@ -166,34 +172,51 @@ function titleCandidates(book: Book): string[] {
  * while the compatibility check below accepts abbreviated middle/second names
  * without treating genuinely different authors as the same person.
  */
-function authorIdentity(book: Book): string {
-  const name = book.authors.find((author) => normalize(author))
-  if (!name) return ''
-  return normalize(name)
-    .replace(/\b(?:author|editor|illustrator|translator)\b/g, ' ')
-    .split(' ')
+function authorIdentities(book: Book): string[] {
+  return book.authors
+    .map((author) =>
+      normalize(author)
+        .replace(/\b(?:author|editor|illustrator|translator)\b/g, ' ')
+        .split(' ')
+        .filter(Boolean)
+        .sort()
+        .join(' '),
+    )
     .filter(Boolean)
-    .sort()
-    .join(' ')
 }
 
-function authorsCompatible(a: Book, b: Book): boolean {
-  const left = authorIdentity(a)
-  const right = authorIdentity(b)
-  if (!left || !right) return true
+function namesCompatible(left: string, right: string): boolean {
   if (left === right) return true
 
   const leftTokens = left.split(' ')
   const rightTokens = right.split(' ')
-  if (leftTokens.length !== rightTokens.length) return false
+  if (leftTokens.length === rightTokens.length) {
+    return leftTokens.every((token, index) => {
+      const other = rightTokens[index]
+      if (token === other) return true
+      if (token.length === 1) return token === other[0]
+      if (other.length === 1) return other === token[0]
+      return false
+    })
+  }
 
-  return leftTokens.every((token, index) => {
-    const other = rightTokens[index]
-    if (token === other) return true
-    if (token.length === 1) return token === other[0]
-    if (other.length === 1) return other === token[0]
-    return false
+  // A record can add or drop a middle initial. Do not ignore a whole extra name,
+  // because that could collapse two genuinely different contributors.
+  const [longer, shorter] =
+    leftTokens.length > rightTokens.length ? [leftTokens, rightTokens] : [rightTokens, leftTokens]
+  if (longer.length - shorter.length !== 1) return false
+  const extraIndex = longer.findIndex((token, index) => {
+    if (token.length !== 1) return false
+    return [...longer.slice(0, index), ...longer.slice(index + 1)].join(' ') === shorter.join(' ')
   })
+  return extraIndex >= 0
+}
+
+function authorsCompatible(a: Book, b: Book): boolean {
+  const left = authorIdentities(a)
+  const right = authorIdentities(b)
+  if (left.length === 0 || right.length === 0) return true
+  return left.some((author) => right.some((other) => namesCompatible(author, other)))
 }
 
 /** Two Google IDs are one work when their usable titles and authors agree. */
@@ -422,4 +445,66 @@ export function rankSwipeBooks(
   }
 
   return selected.map((candidate) => candidate.book)
+}
+
+/**
+ * Remember every edition fetched for a batch, not just the one shown. Later
+ * batches then cannot reintroduce a work from an earlier search.
+ */
+export function registerSwipeWorks(seen: readonly Book[], fetched: readonly Book[]): Book[] {
+  const registered = [...seen]
+  for (const book of fetched) {
+    if (!book.sourceId) continue
+    const index = registered.findIndex((existing) => isSameWork(existing, book))
+    if (index < 0) registered.push(book)
+    else if (isStrongerRecord(book, registered[index])) registered[index] = book
+  }
+  return registered
+}
+
+/**
+ * Insert books into the active queue in one pass over the complete combined
+ * pool. Replacing a duplicate in place keeps the existing rank order while
+ * still showing the strongest record for that work.
+ */
+export function mergeSwipeBooks(current: readonly Book[], incoming: readonly Book[]): Book[] {
+  const merged = [...current]
+  for (const book of incoming) {
+    const index = merged.findIndex((existing) => isSameWork(existing, book))
+    if (index < 0) merged.push(book)
+    else if (isStrongerRecord(book, merged[index])) merged[index] = book
+  }
+  return merged
+}
+
+export interface SwipeQueueState {
+  queue: Book[]
+  seenWorks: Book[]
+}
+
+/**
+ * Atomic batch commit used by the component. Registering fetched works before
+ * ranking and merging through a single state object makes repeated or out-of-
+ * order batch completions safe.
+ */
+export function applySwipeBatch(
+  state: SwipeQueueState,
+  results: readonly SwipeQueryResults[],
+  context: Omit<SwipeRankingContext, 'seenWorks'> = {},
+): SwipeQueueState {
+  const fetched = results.flatMap(({ books }) => books)
+  // Rank against earlier batches only; registering this batch first would hide
+  // the very books it just fetched.
+  const fresh = rankSwipeBooks(results, { ...context, seenWorks: state.seenWorks })
+  const seenWorks = registerSwipeWorks(state.seenWorks, fetched)
+  const queue = mergeSwipeBooks(state.queue, fresh)
+
+  // A later batch can carry a stronger edition of a work already queued. The
+  // rank still excludes it as a duplicate, but the reader sees the best record.
+  for (const book of fetched) {
+    const index = queue.findIndex((existing) => isSameWork(existing, book))
+    if (index >= 0 && isStrongerRecord(book, queue[index])) queue[index] = book
+  }
+
+  return { queue, seenWorks }
 }

@@ -12,11 +12,11 @@ import { Heart, RotateCcw, Sparkles, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '../ui'
 import { searchBooks, SWIPE_QUERIES, type Book } from '../../lib/books'
-import { rankSwipeBooks } from '../../lib/swipe-ranking'
+import { applySwipeBatch, type SwipeQueryResults, type SwipeQueueState } from '../../lib/swipe-ranking'
 import { useBookInteractions, type SwipeAction } from '../../lib/useBookInteractions'
 import { useSavedBooks } from '../../lib/useSavedBooks'
 import { BookCover } from './BookCover'
-import { BookDetailsModal } from './BookDetailsModal'
+import { useBookDetails } from './BookDetailsContext'
 
 const SWIPE_THRESHOLD = 110
 const QUERIES_PER_STACK = 4
@@ -32,6 +32,7 @@ export function SwipeDiscovery() {
   const saved = useSavedBooks()
   const interactions = useBookInteractions()
   const { success, error: notifyError } = useToast()
+  const { openDetails } = useBookDetails()
 
   const [queue, setQueue] = useState<Book[]>([])
   const [position, setPosition] = useState(0)
@@ -41,84 +42,107 @@ export function SwipeDiscovery() {
   const [busy, setBusy] = useState(false)
   const [authOpen, setAuthOpen] = useState(false)
   const [history, setHistory] = useState<SwipeRecord[]>([])
-  const [detailsBook, setDetailsBook] = useState<Book | null>(null)
-  const [detailsOpen, setDetailsOpen] = useState(false)
 
   const [dragX, setDragX] = useState(0)
   const [dragging, setDragging] = useState(false)
   const startX = useRef(0)
-  const seenWorks = useRef<Book[]>([])
-  const loadedBatch = useRef(-1)
   const pressedDetails = useRef(false)
   const dragged = useRef(false)
+
+  // The queue and its fetched-work registry are committed together, so two
+  // batch requests finishing out of order cannot append the same work twice.
+  const queueState = useRef<SwipeQueueState>({ queue: [], seenWorks: [] })
+  const pendingBatches = useRef(new Map<number, Promise<void>>())
+  const activeLoads = useRef(0)
+  const mounted = useRef(true)
+  const resetToken = useRef(0)
 
   const dataLoading = saved.loading || interactions.loading
   const excludedIds = new Set([
     ...saved.savedBooks.map((book) => book.sourceId),
     ...interactions.interactions.map((book) => book.sourceId),
   ])
+  const latestProfile = useRef({
+    excludedIds,
+    liked: [] as Book[],
+    passed: [] as Book[],
+    saved: [] as Book[],
+  })
+  latestProfile.current = {
+    excludedIds,
+    liked: interactions.interactions.filter((book) => book.action === 'like'),
+    passed: interactions.interactions.filter((book) => book.action === 'pass'),
+    saved: saved.savedBooks,
+  }
 
   useEffect(() => {
-    if (dataLoading || loadedBatch.current === batch) return
-    loadedBatch.current = batch
-    let cancelled = false
-
-    async function loadStack() {
-      setLoading(true)
-      setError('')
-      const queries = SWIPE_QUERIES.slice(batch * QUERIES_PER_STACK, (batch + 1) * QUERIES_PER_STACK)
-
-      if (queries.length === 0) {
-        setLoading(false)
-        return
-      }
-
-      const results = await Promise.all(
-        queries.map(async (query) => {
-          try {
-            return await searchBooks(query.query, 20)
-          } catch {
-            return [] as Book[]
-          }
-        }),
-      )
-
-      if (cancelled) return
-      if (results.every((items) => items.length === 0)) {
-        setError('Google Books could not be reached. Please try again in a moment.')
-        setLoading(false)
-        return
-      }
-
-      const fresh = rankSwipeBooks(
-        queries.map((query, index) => ({ query, books: results[index] ?? [] })),
-        {
-          excludedIds,
-          seenWorks: seenWorks.current,
-          liked: interactions.interactions.filter((book) => book.action === 'like'),
-          passed: interactions.interactions.filter((book) => book.action === 'pass'),
-          saved: saved.savedBooks,
-        },
-      )
-
-      // Remember every fetched edition, not only the ones shown, so a later
-      // batch cannot reintroduce a duplicate work from an earlier search.
-      results.flat().forEach((book) => seenWorks.current.push(book))
-      if (batch === 0) {
-        setQueue(fresh)
-        setPosition(0)
-      } else {
-        setQueue((current) => [...current, ...fresh])
-      }
-      setLoading(false)
-    }
-
-    void loadStack()
+    mounted.current = true
     return () => {
-      cancelled = true
+      mounted.current = false
     }
-    // The refs above make this a one-time load per batch; the record hooks are
-    // deliberately included so their first ready state can unblock the fetch.
+  }, [])
+
+  useEffect(() => {
+    if (dataLoading) return
+
+    // Reuse an in-flight request instead of firing a second copy for the same
+    // batch when a record hook briefly flips its loading state.
+    let request = pendingBatches.current.get(batch)
+    if (!request) {
+      const token = resetToken.current
+      request = (async () => {
+        activeLoads.current += 1
+        setLoading(true)
+        setError('')
+        const queries = SWIPE_QUERIES.slice(batch * QUERIES_PER_STACK, (batch + 1) * QUERIES_PER_STACK)
+
+        if (queries.length === 0) return
+
+        try {
+          const results = await Promise.all(
+            queries.map(async (query) => {
+              try {
+                return await searchBooks(query.query, 20)
+              } catch {
+                return [] as Book[]
+              }
+            }),
+          )
+
+          if (!mounted.current || token !== resetToken.current) return
+          if (results.every((items) => items.length === 0)) {
+            setError('Google Books could not be reached. Please try again in a moment.')
+            return
+          }
+
+          const fetched: SwipeQueryResults[] = queries.map((query, index) => ({
+            query,
+            books: results[index] ?? [],
+          }))
+          const profile = latestProfile.current
+          const next = applySwipeBatch(queueState.current, fetched, {
+            excludedIds: profile.excludedIds,
+            liked: profile.liked,
+            passed: profile.passed,
+            saved: profile.saved,
+          })
+          queueState.current = next
+          setQueue(next.queue)
+          if (batch === 0) setPosition(0)
+        } finally {
+          activeLoads.current = Math.max(0, activeLoads.current - 1)
+          if (mounted.current && activeLoads.current === 0) setLoading(false)
+        }
+      })()
+      pendingBatches.current.set(batch, request)
+      void request
+        .catch(() => undefined)
+        .finally(() => {
+          if (pendingBatches.current.get(batch) === request) pendingBatches.current.delete(batch)
+        })
+    }
+    // The record hooks are deliberately included so their first ready state can
+    // unblock the fetch; pendingBatches prevents a duplicate request.
   }, [batch, dataLoading])
 
   const current = queue[position]
@@ -182,10 +206,11 @@ export function SwipeDiscovery() {
     }
   }
 
-  function openDetails() {
+  function showDetails() {
     if (!current || busy || dragged.current) return
-    setDetailsBook(current)
-    setDetailsOpen(true)
+    // The shared provider renders this dialog outside the pointer-capture
+    // surface, so clicks inside it cannot advance or undo the swipe stack.
+    openDetails(current)
   }
 
   function onPointerDown(event: React.PointerEvent<HTMLDivElement>) {
@@ -220,7 +245,7 @@ export function SwipeDiscovery() {
     const onDetailsTrigger = Boolean(
       (event.target as HTMLElement).closest('[data-testid="book-details-open"]'),
     )
-    if ((pressedDetails.current || onDetailsTrigger) && !dragged.current) openDetails()
+    if ((pressedDetails.current || onDetailsTrigger) && !dragged.current) showDetails()
     pressedDetails.current = false
     dragged.current = false
   }
@@ -274,8 +299,11 @@ export function SwipeDiscovery() {
             <button
               type="button"
               onClick={() => {
-                loadedBatch.current = -1
+                resetToken.current += 1
+                queueState.current = { queue: [], seenWorks: [] }
+                pendingBatches.current.clear()
                 setQueue([])
+                setPosition(0)
                 setBatch(0)
               }}
               className="mt-5 rounded-full border border-primary px-5 py-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-primary hover:bg-primary hover:text-primary-foreground"
@@ -420,11 +448,6 @@ export function SwipeDiscovery() {
         )}
       </div>
 
-      <BookDetailsModal
-        book={detailsBook}
-        open={detailsOpen}
-        onClose={() => setDetailsOpen(false)}
-      />
       {authOpen && <AuthOverlay onClose={() => setAuthOpen(false)} />}
     </section>
   )

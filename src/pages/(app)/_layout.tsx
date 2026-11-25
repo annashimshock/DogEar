@@ -20,6 +20,7 @@ import { Outlet } from 'react-router-dom'
 import { DeepSpaceAuthProvider, useAuthStatus } from 'deepspace'
 import { RecordProvider, RecordScope, AgentTools } from 'deepspace'
 import Navigation from '../../components/Navigation'
+import { BookDetailsProvider } from '../../components/books/BookDetailsContext'
 import { useToast } from '@/components/ui'
 import { APP_NAME, SCOPE_ID } from '../../constants'
 import { schemas } from '../../schemas'
@@ -74,7 +75,7 @@ function AuthBoot({ children }: { children: ReactNode }) {
     >
       <RecordScope roomId={SCOPE_ID} schemas={schemas}>
         <AgentTools />
-        {children}
+        <BookDetailsProvider>{children}</BookDetailsProvider>
       </RecordScope>
     </RecordProvider>
   )

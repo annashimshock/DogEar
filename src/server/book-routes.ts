@@ -8,13 +8,39 @@
  */
 
 import { generateText } from 'ai'
-import { appendMessage, createDeepSpaceAI, getChat, loadMessages, updateChat } from 'deepspace/worker'
+import {
+  appendMessage,
+  createDeepSpaceAI,
+  createUserToolExecutor,
+  getChat,
+  loadMessages,
+  updateChat,
+} from 'deepspace/worker'
 import type { AppContext, Env } from '../../worker'
 import type { Hono } from 'hono'
 import { resolveAuth } from './http-routes.js'
 import { recordRoomStub } from './record-room.js'
 import { deriveChatTitle } from '../ai/chat-title.js'
 import type { PreferenceSummary } from '../lib/preferences'
+import {
+  applyGroundedReasons,
+  JSON_ONLY_RETRY,
+  parseJsonObject,
+  reasonsFromObject,
+  responseText,
+  suggestionFromObject,
+} from './book-notes.js'
+import {
+  detectRequestFocus,
+  fallbackQueries,
+  hasBehavior,
+  loadReaderProfile,
+  mergeProfile,
+  profileContext,
+  rankRecommendations,
+  type ReaderProfile,
+  type RequestFocus,
+} from '../lib/recommendations.js'
 
 interface GoogleBook {
   id: string
@@ -124,28 +150,6 @@ async function googleSearch(
   }
 }
 
-/** Models occasionally wrap JSON in prose or code fences; take the object. */
-function parseSuggestionJson(raw: string): { reply: string; queries: string[]; reasons: string[] } {
-  const start = raw.indexOf('{')
-  const end = raw.lastIndexOf('}')
-  if (start < 0 || end <= start) throw new Error('No JSON in model response')
-
-  const parsed = JSON.parse(raw.slice(start, end + 1)) as {
-    reply?: unknown
-    queries?: unknown
-    reasons?: unknown
-  }
-
-  const strings = (value: unknown): string[] =>
-    Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
-
-  return {
-    reply: typeof parsed.reply === 'string' ? parsed.reply : '',
-    queries: strings(parsed.queries).slice(0, 3),
-    reasons: strings(parsed.reasons).slice(0, 8),
-  }
-}
-
 interface ChatTurnInput {
   role: 'user' | 'assistant'
   content: string
@@ -182,48 +186,125 @@ function readPreferences(value: unknown, userId: string): PreferenceSummary {
   }
 }
 
-function hasPreferenceData(preferences: PreferenceSummary): boolean {
-  return (
-    preferences.liked.length > 0 ||
-    preferences.passed.length > 0 ||
-    preferences.saved.length > 0 ||
-    preferences.authors.length > 0 ||
-    preferences.categories.length > 0 ||
-    preferences.conversationHints.length > 0
-  )
-}
-
-function preferenceContext(preferences: PreferenceSummary): string {
-  if (!hasPreferenceData(preferences)) {
-    return 'Reader profile: new here, no saved or swiped books yet. Suggest a broad, welcoming starter shelf.'
-  }
-  return [
-    'Reader profile from their own library and swipe history (use it, do not recite it):',
-    `Liked or read: ${preferences.liked.join('; ') || 'none'}`,
-    `Passed on (avoid these): ${preferences.passed.join('; ') || 'none'}`,
-    `Library: ${preferences.saved.map((book) => `${book.title} (${book.status})`).join('; ') || 'none'}`,
-    `Enjoyed authors: ${preferences.authors.join('; ') || 'none'}`,
-    `Enjoyed categories: ${preferences.categories.join('; ') || 'none'}`,
-    `Earlier requests to the bookseller: ${preferences.conversationHints.join(' | ') || 'none'}`,
-  ].join('\n')
-}
-
-interface ExcludedBooks {
-  ids: Set<string>
-  titles: Set<string>
-}
-
-function isExcluded(book: BookResult, excluded: ExcludedBooks): boolean {
-  return excluded.ids.has(book.sourceId) || excluded.titles.has(book.title.trim().toLowerCase())
-}
-
 interface GroundingOptions {
   env: Env
   token: string
   system: string
   prompt: string
-  preferences: PreferenceSummary
+  profile: ReaderProfile
+  hints: readonly string[]
+  focus: RequestFocus
+  excludedIds?: readonly string[]
   maxBooks?: number
+}
+
+interface GeneratedJson {
+  object: Record<string, unknown> | null
+  raw: string
+  textLength: number
+  finishReason?: string
+  rawFinishReason?: string
+  attempts: number
+}
+
+type GeneratedText = {
+  content?: unknown
+  text?: unknown
+  finishReason?: string
+  rawFinishReason?: string
+}
+
+/** One JSON-only retry for formatting failures; never loop on a broken model. */
+async function generateJsonObject(
+  generate: (prompt: string) => Promise<GeneratedText>,
+  accept: (object: Record<string, unknown>) => boolean = () => true,
+): Promise<GeneratedJson> {
+  const attempt = async (prompt: string): Promise<GeneratedJson> => {
+    const result = await generate(prompt)
+    const raw = responseText(result)
+    const object = parseJsonObject(raw)
+    return {
+      object: object && accept(object) ? object : null,
+      raw,
+      textLength: raw.length,
+      finishReason: result.finishReason,
+      rawFinishReason: result.rawFinishReason,
+      attempts: 1,
+    }
+  }
+
+  const first = await attempt('')
+  if (first.object) return first
+
+  const second = await attempt(JSON_ONLY_RETRY)
+  return { ...second, attempts: 2 }
+}
+
+/** Diagnostic only: never log the model text, which can contain reader data. */
+function warnUnusableJson(kind: string, fallback: string, result: GeneratedJson): void {
+  console.warn(`${kind} response was not usable JSON; using ${fallback}.`, {
+    attempts: result.attempts,
+    finishReason: result.finishReason,
+    rawFinishReason: result.rawFinishReason,
+    textLength: result.textLength,
+  })
+}
+
+/**
+ * Second pass: explain the actual records we found. The first pass chooses
+ * searches before any books are known, so reasons written there would be guesses.
+ */
+async function explainGroundedBooks(
+  env: Env,
+  token: string,
+  books: readonly BookResult[],
+  profile: ReaderProfile,
+  hints: readonly string[],
+  focus: RequestFocus,
+): Promise<(string | undefined)[]> {
+  if (books.length === 0) return []
+
+  const factory = createDeepSpaceAI(env, 'anthropic', { authToken: token })
+  const basePrompt = [
+    'Real Google Books records:',
+    JSON.stringify(
+      books.map((book) => ({
+        sourceId: book.sourceId,
+        title: book.title,
+        authors: book.authors,
+        categories: book.categories,
+      })),
+    ),
+    profileContext(profile, hints, focus),
+    'Reply with JSON only: {"reasons":{"<sourceId>":"one grounded sentence",...}}.',
+    'Use every sourceId exactly once. Each reason must name its book and connect it to a real author, category, or the reader request above. No generic praise.',
+  ].join('\n')
+
+  try {
+    const generated = await generateJsonObject(
+      async (suffix) =>
+        generateText({
+          model: factory('claude-haiku-5-5'),
+          maxOutputTokens: 700,
+          system:
+            'You write short, concrete book notes for DogEar. Use only the record fields you are given. Never describe plot events or invent awards, metadata, or details that are not in the record.',
+          prompt: suffix ? `${basePrompt}\n${suffix}` : basePrompt,
+        }),
+      (object) => reasonsFromObject(object, books).size > 0,
+    )
+    if (!generated.object) {
+      warnUnusableJson('Book note generation', 'grounded fallbacks', generated)
+      return []
+    }
+    const reasons = reasonsFromObject(generated.object, books)
+    return books.map((book) => reasons.get(book.sourceId))
+  } catch (error) {
+    console.warn('Book note generation unavailable; using grounded fallbacks:', {
+      name: error instanceof Error ? error.name : 'UnknownError',
+      message: error instanceof Error ? error.message.slice(0, 200) : 'Unknown failure',
+    })
+    return []
+  }
 }
 
 /** One grounding pipeline shared by the chat and personalized-shelf endpoints. */
@@ -232,19 +313,27 @@ async function recommendGrounded({
   token,
   system,
   prompt,
-  preferences,
+  profile,
+  hints,
+  focus,
+  excludedIds,
   maxBooks = 8,
 }: GroundingOptions): Promise<StoredRecommendation> {
   const factory = createDeepSpaceAI(env, 'anthropic', { authToken: token })
-  const { text } = await generateText({
-    model: factory('claude-haiku-5-5'),
-    maxOutputTokens: 1200,
-    system,
-    prompt,
-  })
+  const generated = await generateJsonObject(
+    async (suffix) =>
+      generateText({
+        model: factory('claude-haiku-5-5'),
+        maxOutputTokens: 1200,
+        system,
+        prompt: suffix ? `${prompt}\n${suffix}` : prompt,
+      }),
+    (object) => suggestionFromObject(object) !== null,
+  )
+  const suggestion = generated.object ? suggestionFromObject(generated.object) : null
+  if (!suggestion) warnUnusableJson('Bookseller response', 'catalogue fallbacks', generated)
 
-  const suggestion = parseSuggestionJson(text)
-  const queries = suggestion.queries.length > 0 ? suggestion.queries : ['literary fiction']
+  const queries = suggestion?.queries.length ? suggestion.queries : fallbackQueries(focus)
   const found = await Promise.all(
     queries.map(async (query) => {
       try {
@@ -255,37 +344,37 @@ async function recommendGrounded({
     }),
   )
 
-  const excluded: ExcludedBooks = {
-    ids: new Set(preferences.excludedIds),
-    titles: new Set(
-      [...preferences.passed, ...preferences.saved.map((book) => book.title)].map((title) =>
-        title.trim().toLowerCase(),
-      ),
-    ),
-  }
-  const seen = new Set<string>()
-  const books = found
-    .flat()
-    .filter((book) => {
-      if (seen.has(book.sourceId) || isExcluded(book, excluded)) return false
-      seen.add(book.sourceId)
-      return true
-    })
-    .slice(0, maxBooks)
-    .map((book, index) => ({ ...book, reason: suggestion.reasons[index] ?? '' }))
+  const ranked = rankRecommendations(found.flat(), profile, {
+    maxBooks,
+    focus,
+    excludedIds,
+  })
+  const notes = await explainGroundedBooks(env, token, ranked, profile, hints, focus)
+  const notesBySourceId = new Map(
+    ranked.map((book, index) => [book.sourceId, notes[index]] as const).filter(([, note]) => !!note),
+  )
+  const books = applyGroundedReasons(
+    ranked,
+    JSON.stringify({ reasons: Object.fromEntries(notesBySourceId) }),
+    profile,
+    focus,
+  )
 
   return {
-    reply: suggestion.reply || 'Let me see what I can find on the shelves for you.',
+    reply: suggestion?.reply || 'Let me see what I can find on the shelves for you.',
     books,
   }
 }
 
 const BOOKSELLER_BASE = [
   'You are the bookseller at DogEar, a warm independent bookstore.',
+  'For readers without a specific request, favor fiction: contemporary and literary fiction, fantasy, science fiction, mystery, thrillers, romance, historical fiction, and acclaimed novels.',
+  'Historical fiction is fiction. Popular, accessible nonfiction may appear occasionally, but textbooks, course materials, study aids, and reference books are off the shelves unless explicitly requested.',
   'Never name a specific title or author in your reply — describe moods and themes instead; the app supplies real titles from Google Books.',
   'Reply with JSON only, shaped exactly as:',
-  '{"reply":"two or three warm sentences responding to the reader","queries":["google books search query","another query","a third query"],"reasons":["why the first book fits","why the second fits",...]}',
-  'Queries must be broad catalogue searches (for example "literary fiction grief friendship"), not title lookups. Give one reason per expected book.',
+  '{"reply":"two or three warm sentences responding to the reader","queries":["google books search query","another query","a third query"]}',
+  'Queries must be broad catalogue searches (for example "literary fiction grief friendship"), not title lookups.',
+  'A specific request in the current conversation overrides the reader’s general taste. Use the persisted reader profile as the strongest general signal.',
 ].join(' ')
 
 interface RecommendBody {
@@ -338,18 +427,26 @@ export function registerBookRoutes(app: Hono<AppContext>): void {
     if (body?.userId !== undefined && body.userId !== auth.userId) {
       return c.json({ error: 'Forbidden' }, 403)
     }
-    const preferences = readPreferences(body?.preferences, auth.userId)
+    const submitted = readPreferences(body?.preferences, auth.userId)
     const token = c.req.header('Authorization')?.replace(/^Bearer\s+/i, '') ?? ''
+    const focus = detectRequestFocus('')
 
     try {
+      // Always read the owned rows at generation time; the client snapshot only
+      // supplies chat hints and covers writes that have not synced back yet.
+      const execute = createUserToolExecutor(c.env, submitted.userId, c.req.raw.signal)
+      const profile = mergeProfile(await loadReaderProfile(execute, submitted.userId), submitted)
       const result = await recommendGrounded({
         env: c.env,
         token,
-        system: `${BOOKSELLER_BASE} ${preferenceContext(preferences)} Pick three search queries that fit the profile. Write each reason as a short note about why that kind of book suits this reader.`,
-        prompt: 'Choose three real catalogue searches for this reader and write a short reason for each expected recommendation.',
-        preferences,
+        system: `${BOOKSELLER_BASE}\n${profileContext(profile, submitted.conversationHints, focus)} Pick three broad catalogue searches that fit this reader.`,
+        prompt: 'Choose three real catalogue searches for this reader and write a short reply.',
+        profile,
+        hints: submitted.conversationHints,
+        focus,
+        excludedIds: submitted.excludedIds,
       })
-      return c.json({ ...result, basis: hasPreferenceData(preferences) ? 'personal' : 'starter' })
+      return c.json({ ...result, basis: hasBehavior(profile) ? 'personal' : 'starter' })
     } catch (error) {
       console.error('Personal recommendations failed:', error)
       return c.json(
@@ -379,7 +476,8 @@ export function registerBookRoutes(app: Hono<AppContext>): void {
     }
 
     const token = c.req.header('Authorization')?.replace(/^Bearer\s+/i, '') ?? ''
-    const preferences = readPreferences(body?.preferences, auth.userId)
+    const submitted = readPreferences(body?.preferences, auth.userId)
+    const focus = detectRequestFocus(message)
     const stub = recordRoomStub(c.env)
     const chat = await getChat(stub, chatId, auth.userId)
     if (!chat) return c.json({ error: 'Conversation not found.' }, 404)
@@ -404,12 +502,17 @@ export function registerBookRoutes(app: Hono<AppContext>): void {
     const assistantId = `asst-${Date.now()}-${crypto.randomUUID()}`
 
     try {
+      const execute = createUserToolExecutor(c.env, submitted.userId, c.req.raw.signal)
+      const profile = mergeProfile(await loadReaderProfile(execute, submitted.userId), submitted)
       const result = await recommendGrounded({
         env: c.env,
         token,
-        system: `${BOOKSELLER_BASE}\n${preferenceContext(preferences)}`,
-        prompt: `${transcript}\n\nRespond to the reader's latest request using their profile when relevant.`,
-        preferences,
+        system: `${BOOKSELLER_BASE}\n${profileContext(profile, submitted.conversationHints, focus)}`,
+        prompt: `${transcript}\n\nRespond to the reader's latest request. It overrides general taste when specific; use their persisted reading profile otherwise.`,
+        profile,
+        hints: submitted.conversationHints,
+        focus,
+        excludedIds: submitted.excludedIds,
       })
 
       // Persist user → assistant → title using the worker helpers. All three

@@ -32,7 +32,9 @@ export function buildPreferenceSummary(
 ): PreferenceSummary {
   const likedBooks = interactions.filter((item) => item.action === 'like')
   const passedBooks = interactions.filter((item) => item.action === 'pass')
-  const enjoyed = [...likedBooks, ...savedBooks.filter((book) => book.status === 'read')]
+  // Every saved book is a positive signal; reading and finished shelves carry
+  // extra context on the server, but a Want to Read pick still counts.
+  const enjoyed = [...likedBooks, ...savedBooks]
 
   return {
     userId,

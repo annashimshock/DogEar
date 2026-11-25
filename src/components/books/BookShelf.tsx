@@ -10,6 +10,7 @@ interface BookShelfProps {
   reasonById?: Record<string, string>
   loading?: boolean
   emptyMessage?: string
+  onOpenDetails?: (book: Book) => void
 }
 
 /** A horizontally browsable shelf — the bookstore's version of a carousel. */
@@ -20,6 +21,7 @@ export function BookShelf({
   reasonById,
   loading = false,
   emptyMessage = 'This shelf is being restocked. Check back soon.',
+  onOpenDetails,
 }: BookShelfProps) {
   const scroller = useRef<HTMLDivElement>(null)
 
@@ -79,6 +81,7 @@ export function BookShelf({
                 key={`${book.source}:${book.sourceId}`}
                 book={book}
                 reason={reasonById?.[book.sourceId]}
+                onOpenDetails={onOpenDetails}
                 className="w-32 shrink-0 snap-start sm:w-40"
               />
             ))}

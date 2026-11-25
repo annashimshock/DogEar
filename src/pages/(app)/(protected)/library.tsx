@@ -9,6 +9,7 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { LibraryBig } from 'lucide-react'
 import { BookCard } from '../../../components/books/BookCard'
+import { useBookDetails } from '../../../components/books/BookDetailsContext'
 import { EmptyState, Tabs, TabsContent, TabsList, TabsTrigger, useToast } from '../../../components/ui'
 import {
   BOOK_STATUSES,
@@ -21,6 +22,7 @@ export default function LibraryPage() {
   const navigate = useNavigate()
   const { savedBooks, loading, setStatus } = useSavedBooks()
   const { success, error: notifyError } = useToast()
+  const { openDetails } = useBookDetails()
   const [tab, setTab] = useState<BookStatus>('want')
 
   const visible = savedBooks.filter((book) => book.status === tab)
@@ -100,6 +102,7 @@ export default function LibraryPage() {
                       statusControl
                       status={book.status}
                       onStatusChange={(next) => void handleStatusChange(book, next)}
+                      onOpenDetails={openDetails}
                     />
                   ))}
                 </div>

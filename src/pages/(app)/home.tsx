@@ -11,6 +11,7 @@ import { useEffect, useState } from 'react'
 import { useAuthProfileReady } from 'deepspace'
 import { APP_NAME } from '../../constants'
 import { BookCard } from '../../components/books/BookCard'
+import { useBookDetails } from '../../components/books/BookDetailsContext'
 import { BookShelf } from '../../components/books/BookShelf'
 import { SwipeDiscovery } from '../../components/books/SwipeDiscovery'
 import { Button, SearchInput } from '../../components/ui'
@@ -26,6 +27,7 @@ const FEATURED_QUERY = 'bestseller literary fiction'
 
 export default function HomePage() {
   const { isSignedIn, user } = useAuthProfileReady({ requireUser: true })
+  const { openDetails } = useBookDetails()
 
   const [query, setQuery] = useState('')
   const [books, setBooks] = useState<Book[]>([])
@@ -199,7 +201,11 @@ export default function HomePage() {
             ) : books.length > 0 ? (
               <div className="grid grid-cols-2 gap-x-5 gap-y-9 sm:grid-cols-3 lg:grid-cols-5">
                 {books.map((book) => (
-                  <BookCard key={`${book.source}:${book.sourceId}`} book={book} />
+                  <BookCard
+                    key={`${book.source}:${book.sourceId}`}
+                    book={book}
+                    onOpenDetails={openDetails}
+                  />
                 ))}
               </div>
             ) : !error ? (
@@ -227,6 +233,7 @@ export default function HomePage() {
               title="Freshly shelved"
               books={featured}
               loading={shelvesLoading}
+              onOpenDetails={openDetails}
             />
             {CURATED_SHELVES.map((shelf) => (
               <BookShelf
@@ -235,6 +242,7 @@ export default function HomePage() {
                 title={shelf.title}
                 books={shelves[shelf.id] ?? []}
                 loading={shelvesLoading}
+                onOpenDetails={openDetails}
               />
             ))}
           </div>

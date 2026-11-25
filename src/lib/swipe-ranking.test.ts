@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Book, SwipeQuery } from './books'
-import { rankSwipeBooks } from './swipe-ranking'
+import { applySwipeBatch, rankSwipeBooks, type SwipeQueueState } from './swipe-ranking'
 
 function book(overrides: Partial<Book> & Pick<Book, 'sourceId' | 'title'>): Book {
   return {
@@ -276,5 +276,155 @@ describe('swipe ranking', () => {
     })
 
     expect(result.map((item) => item.sourceId)).toEqual(['liked-match', 'passed-match'])
+  })
+
+  it('keeps one work when two Google Books queries return it', () => {
+    const weak = book({
+      sourceId: 'query-one',
+      title: 'The Quiet Novel',
+      authors: ['Ada Author'],
+      description: 'Short.',
+    })
+    const strong = book({
+      sourceId: 'query-two',
+      title: 'The Quiet Novel: A Novel',
+      authors: ['Ada Author'],
+      coverUrl: 'cover.jpg',
+      ratingsCount: 200,
+      averageRating: 4.4,
+    })
+
+    const result = rankSwipeBooks([
+      { query: { ...query, query: 'first query' }, books: [weak] },
+      { query: { ...query, query: 'second query' }, books: [strong] },
+    ])
+
+    expect(result.map((item) => item.sourceId)).toEqual(['query-two'])
+  })
+
+  it('deduplicates editions across batches and keeps the strongest record', () => {
+    const first = book({
+      sourceId: 'first-edition',
+      title: 'The Quiet Novel (Paperback)',
+      authors: ['Ada Author'],
+      description: 'Short.',
+    })
+    const second = book({
+      sourceId: 'second-edition',
+      title: 'The Quiet Novel: A Novel (Hardcover)',
+      authors: ['Ada Author'],
+      coverUrl: 'cover.jpg',
+      ratingsCount: 400,
+      averageRating: 4.6,
+      description: 'A fuller description that helps a reader choose this work.',
+    })
+
+    const initial: SwipeQueueState = { queue: [], seenWorks: [] }
+    const afterFirst = applySwipeBatch(initial, [{ query, books: [first] }])
+    const afterSecond = applySwipeBatch(afterFirst, [{ query, books: [second] }])
+
+    expect(afterSecond.queue).toHaveLength(1)
+    expect(afterSecond.queue[0].sourceId).toBe('second-edition')
+    expect(afterSecond.seenWorks).toHaveLength(1)
+  })
+
+  it('is safe when two concurrent batch loads return the same work', () => {
+    const weak = book({ sourceId: 'batch-a', title: 'The Quiet Novel', authors: ['Ada Author'] })
+    const strong = book({
+      sourceId: 'batch-b',
+      title: 'The Quiet Novel: A Novel',
+      authors: ['Ada Author'],
+      coverUrl: 'cover.jpg',
+      ratingsCount: 120,
+      averageRating: 4.5,
+    })
+    const batches = [
+      [{ query, books: [weak] }],
+      [{ query, books: [strong] }],
+    ]
+
+    const apply = (ordered: typeof batches) =>
+      ordered.reduce((state, results) => applySwipeBatch(state, results), {
+        queue: [],
+        seenWorks: [],
+      } as SwipeQueueState)
+
+    for (const ordered of [batches, [...batches].reverse()]) {
+      const result = apply(ordered)
+      expect(result.queue).toHaveLength(1)
+      expect(result.queue[0].sourceId).toBe('batch-b')
+    }
+  })
+
+  it('does not reintroduce a displayed work from a later batch', () => {
+    const displayed = book({
+      sourceId: 'displayed',
+      title: 'The Silent Patient',
+      authors: ['Alex Michaelides'],
+    })
+    const laterEdition = book({
+      sourceId: 'later-edition',
+      title: 'The Silent Patient: A Novel (Paperback)',
+      authors: ['Alex Michaelides'],
+    })
+
+    const state = applySwipeBatch({ queue: [], seenWorks: [] }, [{ query, books: [displayed] }])
+    const next = applySwipeBatch(state, [{ query, books: [laterEdition] }])
+
+    expect(next.queue.map((item) => item.sourceId)).toEqual(['displayed'])
+    expect(next.seenWorks).toHaveLength(1)
+    expect(next.seenWorks[0].sourceId).toBe('displayed')
+  })
+
+  it('keeps similar titles by different authors separate during queue insertion', () => {
+    const original = book({
+      sourceId: 'original',
+      title: 'The Silent Patient',
+      authors: ['Alex Michaelides'],
+    })
+    const differentAuthor = book({
+      sourceId: 'different-author',
+      title: 'The Silent Patient',
+      authors: ['Another Author'],
+    })
+
+    const state = applySwipeBatch(
+      { queue: [], seenWorks: [] },
+      [{ query, books: [original] }],
+    )
+    const next = applySwipeBatch(state, [{ query, books: [differentAuthor] }])
+
+    expect(next.queue.map((item) => item.sourceId)).toEqual(['original', 'different-author'])
+  })
+
+  it('recognizes alternate titles and middle initials without merging unrelated books', () => {
+    const translated = book({
+      sourceId: 'translated',
+      title: 'Proyek Hail Mary (Project Hail Mary, #1)',
+      authors: ['Andy Weir'],
+    })
+    const plain = book({
+      sourceId: 'plain',
+      title: 'Project Hail Mary',
+      authors: ['Andy T. Weir'],
+    })
+    const different = book({
+      sourceId: 'different',
+      title: 'Project Hail Mary',
+      authors: ['Ryan Gosling'],
+    })
+
+    expect(applySwipeBatch({ queue: [], seenWorks: [] }, [{ query, books: [translated] }]).queue).toHaveLength(1)
+    expect(
+      applySwipeBatch(
+        applySwipeBatch({ queue: [], seenWorks: [] }, [{ query, books: [translated] }]),
+        [{ query, books: [plain] }],
+      ).queue,
+    ).toHaveLength(1)
+    const rankedIds = rank([translated, plain, different]).map((item) => item.sourceId)
+    expect(rankedIds).toHaveLength(2)
+    expect(rankedIds).not.toContain('plain')
+    expect(rankedIds).toContain('translated')
+    expect(rankedIds).toContain('different')
   })
 })

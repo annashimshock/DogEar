@@ -18,6 +18,8 @@ interface BookCardProps {
   status?: BookStatus
   onStatusChange?: (status: BookStatus) => void
   onRemove?: () => void
+  /** Opens the shared details dialog; omit to keep the card purely informational. */
+  onOpenDetails?: (book: Book) => void
   className?: string
 }
 
@@ -29,6 +31,7 @@ export function BookCard({
   status = 'want',
   onStatusChange,
   onRemove,
+  onOpenDetails,
   className,
 }: BookCardProps) {
   const { isSignedIn, canWrite, isSaved, saveBook, removeBook } = useSavedBooks()
@@ -77,7 +80,19 @@ export function BookCard({
   return (
     <article className={cn('group flex min-w-0 flex-col', className)}>
       <div className="relative">
-        <BookCover book={book} />
+        {onOpenDetails ? (
+          <button
+            type="button"
+            data-testid="book-card-details"
+            aria-label={`View details for ${book.title}`}
+            onClick={() => onOpenDetails(book)}
+            className="block w-full rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          >
+            <BookCover book={book} />
+          </button>
+        ) : (
+          <BookCover book={book} />
+        )}
 
         <button
           type="button"
@@ -99,7 +114,18 @@ export function BookCard({
 
       <div className="mt-3 min-w-0">
         <h3 className="line-clamp-2 font-serif text-[15px] leading-snug text-foreground">
-          {book.title}
+          {onOpenDetails ? (
+            <button
+              type="button"
+              data-testid="book-card-title-details"
+              onClick={() => onOpenDetails(book)}
+              className="rounded-sm text-left hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {book.title}
+            </button>
+          ) : (
+            book.title
+          )}
         </h3>
         <p className="mt-1 truncate text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
           {book.authors.join(', ') || 'Unknown author'}
