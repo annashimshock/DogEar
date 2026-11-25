@@ -16,6 +16,7 @@ import { rankSwipeBooks } from '../../lib/swipe-ranking'
 import { useBookInteractions, type SwipeAction } from '../../lib/useBookInteractions'
 import { useSavedBooks } from '../../lib/useSavedBooks'
 import { BookCover } from './BookCover'
+import { BookDetailsModal } from './BookDetailsModal'
 
 const SWIPE_THRESHOLD = 110
 const QUERIES_PER_STACK = 4
@@ -40,12 +41,16 @@ export function SwipeDiscovery() {
   const [busy, setBusy] = useState(false)
   const [authOpen, setAuthOpen] = useState(false)
   const [history, setHistory] = useState<SwipeRecord[]>([])
+  const [detailsBook, setDetailsBook] = useState<Book | null>(null)
+  const [detailsOpen, setDetailsOpen] = useState(false)
 
   const [dragX, setDragX] = useState(0)
   const [dragging, setDragging] = useState(false)
   const startX = useRef(0)
   const seenWorks = useRef<Book[]>([])
   const loadedBatch = useRef(-1)
+  const pressedDetails = useRef(false)
+  const dragged = useRef(false)
 
   const dataLoading = saved.loading || interactions.loading
   const excludedIds = new Set([
@@ -177,16 +182,28 @@ export function SwipeDiscovery() {
     }
   }
 
+  function openDetails() {
+    if (!current || busy || dragged.current) return
+    setDetailsBook(current)
+    setDetailsOpen(true)
+  }
+
   function onPointerDown(event: React.PointerEvent<HTMLDivElement>) {
     if (busy || !current || (event.pointerType === 'mouse' && event.button !== 0)) return
     startX.current = event.clientX
+    dragged.current = false
+    pressedDetails.current = Boolean(
+      (event.target as HTMLElement).closest('[data-testid="book-details-open"]'),
+    )
     setDragging(true)
     event.currentTarget.setPointerCapture(event.pointerId)
   }
 
   function onPointerMove(event: React.PointerEvent<HTMLDivElement>) {
     if (!dragging) return
-    setDragX(event.clientX - startX.current)
+    const next = event.clientX - startX.current
+    if (Math.abs(next) > 8) dragged.current = true
+    setDragX(next)
   }
 
   function onPointerUp() {
@@ -195,6 +212,17 @@ export function SwipeDiscovery() {
     else if (dragX <= -SWIPE_THRESHOLD) void swipe('pass')
     else setDragX(0)
     setDragging(false)
+  }
+
+  // Pointer capture retargets the click to the swipe surface, so the press
+  // target recorded above is what tells us a tap meant "open details".
+  function onCardClick(event: React.MouseEvent<HTMLDivElement>) {
+    const onDetailsTrigger = Boolean(
+      (event.target as HTMLElement).closest('[data-testid="book-details-open"]'),
+    )
+    if ((pressedDetails.current || onDetailsTrigger) && !dragged.current) openDetails()
+    pressedDetails.current = false
+    dragged.current = false
   }
 
   return (
@@ -266,7 +294,10 @@ export function SwipeDiscovery() {
               onPointerCancel={() => {
                 setDragX(0)
                 setDragging(false)
+                pressedDetails.current = false
+                dragged.current = false
               }}
+              onClick={onCardClick}
               style={{ cursor: dragging ? 'grabbing' : 'grab' }}
             >
               <div
@@ -279,20 +310,30 @@ export function SwipeDiscovery() {
                   opacity: Math.max(0.6, 1 - Math.abs(dragX) / 600),
                 }}
               >
-                <div className={cn('mx-auto w-56 sm:w-64', 'group')}>
-                  <BookCover book={current} />
-                </div>
-                <div className="mx-auto mt-5 max-w-md text-center">
-                  <h3 className="font-serif text-2xl leading-tight text-foreground">{current.title}</h3>
-                  <p className="mt-1.5 text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
-                    {current.authors.join(', ') || 'Unknown author'}
-                  </p>
-                  {current.description && (
-                    <p className="mx-auto mt-3 line-clamp-3 max-w-md text-[13px] leading-relaxed text-muted-foreground">
-                      {current.description}
+                <button
+                  type="button"
+                  data-testid="book-details-open"
+                  aria-label={`View details for ${current.title}`}
+                  className="block w-full rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                >
+                  <div className={cn('mx-auto w-56 sm:w-64', 'group')}>
+                    <BookCover book={current} />
+                  </div>
+                  <div className="mx-auto mt-5 max-w-md text-center">
+                    <h3 className="font-serif text-2xl leading-tight text-foreground">{current.title}</h3>
+                    <p className="mt-1.5 text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
+                      {current.authors.join(', ') || 'Unknown author'}
                     </p>
-                  )}
-                </div>
+                    {current.description && (
+                      <p className="mx-auto mt-3 line-clamp-3 max-w-md text-[13px] leading-relaxed text-muted-foreground">
+                        {current.description}
+                      </p>
+                    )}
+                    <span className="mt-4 inline-block text-[10px] font-semibold uppercase tracking-[0.16em] text-primary">
+                      Read full details →
+                    </span>
+                  </div>
+                </button>
 
                 <span
                   aria-hidden
@@ -379,6 +420,11 @@ export function SwipeDiscovery() {
         )}
       </div>
 
+      <BookDetailsModal
+        book={detailsBook}
+        open={detailsOpen}
+        onClose={() => setDetailsOpen(false)}
+      />
       {authOpen && <AuthOverlay onClose={() => setAuthOpen(false)} />}
     </section>
   )
