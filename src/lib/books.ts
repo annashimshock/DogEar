@@ -66,6 +66,18 @@ export const CURATED_SHELVES = [
   { id: 'comfort-zone', eyebrow: 'A little further afield', title: 'A Little Out of Your Comfort Zone', query: 'speculative literary fiction translated' },
 ] as const
 
+/** Real catalogue queries used to build swipe stacks. */
+export const SWIPE_QUERIES = [
+  'literary fiction',
+  'mystery crime fiction',
+  'science fiction',
+  'contemporary romance',
+  'narrative history',
+  'poetry collection',
+  'translated fiction',
+  'nature writing memoir',
+] as const
+
 /** Mood / genre shortcuts that run a real search when clicked. */
 export const BROWSE_TOPICS = [
   { label: 'Literary Fiction', query: 'literary fiction' },

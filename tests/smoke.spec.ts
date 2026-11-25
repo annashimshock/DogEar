@@ -65,6 +65,19 @@ test.describe('Smoke tests', () => {
     expect(await page.getByText('placeholder page').count()).toBe(0)
   })
 
+  test('discover has a swipe table with real-book states', async ({ page }) => {
+    await page.goto('/home')
+    await expect(page.getByTestId('swipe-discovery')).toBeVisible()
+    await expect(page.getByText('A book for whatever you are feeling')).toBeVisible()
+
+    await expect(
+      page
+        .getByTestId('swipe-card')
+        .or(page.getByTestId('swipe-empty'))
+        .or(page.getByTestId('swipe-error')),
+    ).toBeVisible({ timeout: 20_000 })
+  })
+
   test('sign-in button visible when logged out', async ({ page }) => {
     await page.goto('/home')
     await expect(page.getByTestId('nav-sign-in-button')).toBeVisible({ timeout: 15000 })

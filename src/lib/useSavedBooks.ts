@@ -7,6 +7,7 @@
 import { useCallback } from 'react'
 import { useAuth, useMutations, useQuery } from 'deepspace'
 import type { Book, BookStatus, SavedBook } from './books'
+import { parseBookSnapshot } from './book-parse'
 
 interface UserBookRow {
   userId: string
@@ -16,40 +17,13 @@ interface UserBookRow {
   bookData: string
 }
 
-/** Snapshots tolerate rows saved before `bookData` existed. */
-function parseBook(raw: string, fallbackId: string): Book {
-  try {
-    const parsed = JSON.parse(raw) as Partial<Book>
-    return {
-      source: parsed.source ?? 'google_books',
-      sourceId: parsed.sourceId ?? fallbackId,
-      title: parsed.title ?? 'Untitled',
-      authors: parsed.authors ?? [],
-      description: parsed.description ?? '',
-      categories: parsed.categories ?? [],
-      publishedDate: parsed.publishedDate ?? '',
-      coverUrl: parsed.coverUrl ?? null,
-    }
-  } catch {
-    return {
-      source: 'google_books',
-      sourceId: fallbackId,
-      title: 'Untitled',
-      authors: [],
-      description: '',
-      categories: [],
-      publishedDate: '',
-      coverUrl: null,
-    }
-  }
-}
-
 export function useSavedBooks() {
   const { isSignedIn, userId } = useAuth()
   const ownerId = userId ?? '__anonymous__'
 
   const { records, status: loadStatus } = useQuery<UserBookRow>('user_books', {
     where: { userId: ownerId },
+    limit: 200,
   })
   const { ready, createConfirmed, putConfirmed, removeConfirmed } =
     useMutations<UserBookRow>('user_books')
@@ -57,7 +31,7 @@ export function useSavedBooks() {
   const savedBooks: SavedBook[] = records.map((record) => {
     const row = record.data
     return {
-      ...parseBook(row.bookData, row.bookId),
+      ...parseBookSnapshot(row.bookData, row.bookId),
       recordId: record.recordId,
       status: row.status === 'reading' || row.status === 'read' ? row.status : 'want',
       notes: row.notes ?? '',

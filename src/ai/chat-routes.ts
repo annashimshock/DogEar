@@ -35,6 +35,8 @@ import {
 } from 'deepspace/worker'
 import type { AgentToolAccessResult, AgentToolRouteOptions, ChatTurn } from 'deepspace/worker'
 import { schemas } from '../schemas.js'
+import { recordRoomStub } from '../server/record-room.js'
+import { deriveChatTitle as deriveTitle } from './chat-title.js'
 import { buildSystemPrompt } from './tools.js'
 // Type-only — TypeScript strips these at runtime, so no circular import
 // with worker.ts (which imports `registerAiChatRoutes` from this file).
@@ -45,28 +47,9 @@ type AccessGrant = Extract<AgentToolAccessResult, { ok: true }>
 /** `buildTools` from src/ai/tools.ts; it may ignore the context argument. */
 type ToolFactory = AgentToolRouteOptions<Env>['buildTools']
 
-function recordRoomStub(env: Env): DurableObjectStub {
-  // Rooms are keyed by the immutable app id — the same `app:${DEEPSPACE_APP_ID}`
-  // the client's RecordScope (SCOPE_ID) and worker.ts's own stubs use. Keying
-  // by APP_NAME would read/write a room the browser never subscribes to.
-  return env.RECORD_ROOMS.get(env.RECORD_ROOMS.idFromName(`app:${env.DEEPSPACE_APP_ID}`))
-}
-
 // Cap on user-supplied content length. Far above any realistic message;
 // blocks accidental DoS via megabyte payloads.
 const MAX_USER_CONTENT_LENGTH = 100_000
-
-// Derive a chat title from the first user message — first non-empty line,
-// trimmed to ~50 chars with an ellipsis.
-function deriveTitle(content: string): string {
-  const first =
-    content
-      .trim()
-      .split('\n')
-      .map((l) => l.trim())
-      .find(Boolean) ?? 'Untitled'
-  return first.length <= 50 ? first : first.slice(0, 47).trimEnd() + '…'
-}
 
 export function registerAiChatRoutes(
   app: Hono<AppContext>,

@@ -12,6 +12,7 @@ import { useAuthProfileReady } from 'deepspace'
 import { APP_NAME } from '../../constants'
 import { BookCard } from '../../components/books/BookCard'
 import { BookShelf } from '../../components/books/BookShelf'
+import { SwipeDiscovery } from '../../components/books/SwipeDiscovery'
 import { Button, SearchInput } from '../../components/ui'
 import {
   BROWSE_TOPICS,
@@ -159,6 +160,10 @@ export default function HomePage() {
         </section>
 
         <div className="mt-14 h-px w-full bg-border" />
+
+        {!hasSearched && <SwipeDiscovery />}
+
+        {!hasSearched && <div className="h-px w-full bg-border" />}
 
         {/* Search results take over the shelves while active. */}
         {hasSearched ? (
