@@ -12,6 +12,7 @@ import { Heart, RotateCcw, Sparkles, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '../ui'
 import { searchBooks, SWIPE_QUERIES, type Book } from '../../lib/books'
+import { rankSwipeBooks } from '../../lib/swipe-ranking'
 import { useBookInteractions, type SwipeAction } from '../../lib/useBookInteractions'
 import { useSavedBooks } from '../../lib/useSavedBooks'
 import { BookCover } from './BookCover'
@@ -43,7 +44,7 @@ export function SwipeDiscovery() {
   const [dragX, setDragX] = useState(0)
   const [dragging, setDragging] = useState(false)
   const startX = useRef(0)
-  const seenIds = useRef(new Set<string>())
+  const seenWorks = useRef<Book[]>([])
   const loadedBatch = useRef(-1)
 
   const dataLoading = saved.loading || interactions.loading
@@ -70,7 +71,7 @@ export function SwipeDiscovery() {
       const results = await Promise.all(
         queries.map(async (query) => {
           try {
-            return await searchBooks(query, 20)
+            return await searchBooks(query.query, 20)
           } catch {
             return [] as Book[]
           }
@@ -84,16 +85,20 @@ export function SwipeDiscovery() {
         return
       }
 
-      const fresh = results
-        .flat()
-        .filter(
-          (book) =>
-            !seenIds.current.has(book.sourceId) &&
-            !excludedIds.has(book.sourceId) &&
-            !interactions.passedIds.has(book.sourceId),
-        )
+      const fresh = rankSwipeBooks(
+        queries.map((query, index) => ({ query, books: results[index] ?? [] })),
+        {
+          excludedIds,
+          seenWorks: seenWorks.current,
+          liked: interactions.interactions.filter((book) => book.action === 'like'),
+          passed: interactions.interactions.filter((book) => book.action === 'pass'),
+          saved: saved.savedBooks,
+        },
+      )
 
-      fresh.forEach((book) => seenIds.current.add(book.sourceId))
+      // Remember every fetched edition, not only the ones shown, so a later
+      // batch cannot reintroduce a duplicate work from an earlier search.
+      results.flat().forEach((book) => seenWorks.current.push(book))
       if (batch === 0) {
         setQueue(fresh)
         setPosition(0)

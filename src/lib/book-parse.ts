@@ -13,6 +13,20 @@ export function parseBookSnapshot(raw: string | undefined, fallbackId: string): 
       categories: parsed.categories ?? [],
       publishedDate: parsed.publishedDate ?? '',
       coverUrl: parsed.coverUrl ?? null,
+      averageRating:
+        typeof parsed.averageRating === 'number' && Number.isFinite(parsed.averageRating)
+          ? parsed.averageRating
+          : undefined,
+      ratingsCount:
+        typeof parsed.ratingsCount === 'number' && Number.isFinite(parsed.ratingsCount)
+          ? parsed.ratingsCount
+          : undefined,
+      publisher: typeof parsed.publisher === 'string' ? parsed.publisher : undefined,
+      language: typeof parsed.language === 'string' ? parsed.language : undefined,
+      pageCount:
+        typeof parsed.pageCount === 'number' && Number.isFinite(parsed.pageCount)
+          ? parsed.pageCount
+          : undefined,
     }
   } catch {
     return {

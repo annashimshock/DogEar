@@ -24,6 +24,11 @@ interface GoogleBook {
     description?: string
     categories?: string[]
     publishedDate?: string
+    publisher?: string
+    language?: string
+    pageCount?: number
+    averageRating?: number
+    ratingsCount?: number
     imageLinks?: {
       thumbnail?: string
     }
@@ -44,6 +49,11 @@ export interface BookResult {
   categories: string[]
   publishedDate: string
   coverUrl: string | null
+  averageRating?: number
+  ratingsCount?: number
+  publisher?: string
+  language?: string
+  pageCount?: number
 }
 
 export interface RecommendedBook extends BookResult {
@@ -53,6 +63,10 @@ export interface RecommendedBook extends BookResult {
 interface StoredRecommendation {
   reply: string
   books: RecommendedBook[]
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 function toBook(item: GoogleBook): BookResult {
@@ -68,6 +82,11 @@ function toBook(item: GoogleBook): BookResult {
     categories: info.categories ?? [],
     publishedDate: info.publishedDate ?? '',
     coverUrl: thumbnail?.replace(/^http:/, 'https:') ?? null,
+    averageRating: finiteNumber(info.averageRating),
+    ratingsCount: finiteNumber(info.ratingsCount),
+    publisher: typeof info.publisher === 'string' ? info.publisher : undefined,
+    language: typeof info.language === 'string' ? info.language : undefined,
+    pageCount: finiteNumber(info.pageCount),
   }
 }
 

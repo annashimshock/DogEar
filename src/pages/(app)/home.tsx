@@ -101,7 +101,7 @@ export default function HomePage() {
         {/* Editorial welcome */}
         <section className="relative max-w-4xl">
           <p className="mb-4 text-[11px] font-semibold uppercase tracking-[0.28em] text-primary">
-            An independent bookstore, online
+            A personalized library, just for you
           </p>
           <h1 className="font-serif text-[2.6rem] font-medium leading-[1.08] tracking-tight text-foreground sm:text-6xl lg:text-[4.25rem]">
             Every good book
