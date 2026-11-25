@@ -33,6 +33,7 @@ import {
   resolveAuth,
 } from './src/server/http-routes.js'
 import { registerRealtimeRoutes } from './src/server/realtime-routes.js'
+import { registerBookRoutes } from './src/server/book-routes.js'
 
 // Dynamic deploy reads this manifest to create the app's DO bindings.
 export const __DO_MANIFEST__ = [
@@ -105,6 +106,7 @@ export interface Env extends DOBindings<typeof __DO_MANIFEST__> {
   /** Comma-separated exact Expo/native callback URIs (for example, myapp://auth/callback). */
   NATIVE_AUTH_REDIRECT_URIS?: string
   APP_NAME: string
+  GOOGLE_BOOKS_API_KEY: string
   /** Immutable record-scope and platform identity. */
   DEEPSPACE_APP_ID: string
   OWNER_USER_ID: string
@@ -144,6 +146,7 @@ registerAgent(app, {
   inApp: schemas.some((schema) => schema.name === AI_CHATS_SCHEMA.name),
 })
 registerPlatformProxyRoutes(app)
+registerBookRoutes(app)
 registerStaticRoutes(app)
 
 // Hono registers ONE error handler (last onError wins), and its default is
