@@ -1,0 +1,118 @@
+/**
+ * Saved-books data layer. Everything lives in the existing `user_books`
+ * collection; the book snapshot is stored with each row so a shelf renders
+ * without another Google Books round trip.
+ */
+
+import { useCallback } from 'react'
+import { useAuth, useMutations, useQuery } from 'deepspace'
+import type { Book, BookStatus, SavedBook } from './books'
+
+interface UserBookRow {
+  userId: string
+  bookId: string
+  status: BookStatus
+  notes: string
+  bookData: string
+}
+
+/** Snapshots tolerate rows saved before `bookData` existed. */
+function parseBook(raw: string, fallbackId: string): Book {
+  try {
+    const parsed = JSON.parse(raw) as Partial<Book>
+    return {
+      source: parsed.source ?? 'google_books',
+      sourceId: parsed.sourceId ?? fallbackId,
+      title: parsed.title ?? 'Untitled',
+      authors: parsed.authors ?? [],
+      description: parsed.description ?? '',
+      categories: parsed.categories ?? [],
+      publishedDate: parsed.publishedDate ?? '',
+      coverUrl: parsed.coverUrl ?? null,
+    }
+  } catch {
+    return {
+      source: 'google_books',
+      sourceId: fallbackId,
+      title: 'Untitled',
+      authors: [],
+      description: '',
+      categories: [],
+      publishedDate: '',
+      coverUrl: null,
+    }
+  }
+}
+
+export function useSavedBooks() {
+  const { isSignedIn, userId } = useAuth()
+  const ownerId = userId ?? '__anonymous__'
+
+  const { records, status: loadStatus } = useQuery<UserBookRow>('user_books', {
+    where: { userId: ownerId },
+  })
+  const { ready, createConfirmed, putConfirmed, removeConfirmed } =
+    useMutations<UserBookRow>('user_books')
+
+  const savedBooks: SavedBook[] = records.map((record) => {
+    const row = record.data
+    return {
+      ...parseBook(row.bookData, row.bookId),
+      recordId: record.recordId,
+      status: row.status === 'reading' || row.status === 'read' ? row.status : 'want',
+      notes: row.notes ?? '',
+    }
+  })
+
+  const findRecord = useCallback(
+    (id: string) => records.find((record) => record.data.bookId === id),
+    [records],
+  )
+
+  const saveBook = useCallback(
+    async (book: Book, bookStatus: BookStatus = 'want') => {
+      if (!userId) throw new Error('Sign in to save books.')
+      const id = book.sourceId
+      const existing = findRecord(id)
+      if (existing) {
+        await putConfirmed(existing.recordId, { status: bookStatus })
+        return
+      }
+      await createConfirmed({
+        userId,
+        bookId: id,
+        status: bookStatus,
+        notes: '',
+        bookData: JSON.stringify(book),
+      })
+    },
+    [userId, findRecord, putConfirmed, createConfirmed],
+  )
+
+  const setStatus = useCallback(
+    async (id: string, bookStatus: BookStatus) => {
+      const record = findRecord(id)
+      if (record) await putConfirmed(record.recordId, { status: bookStatus })
+    },
+    [findRecord, putConfirmed],
+  )
+
+  const removeBook = useCallback(
+    async (id: string) => {
+      const record = findRecord(id)
+      if (record) await removeConfirmed(record.recordId)
+    },
+    [findRecord, removeConfirmed],
+  )
+
+  return {
+    isSignedIn,
+    canWrite: ready && isSignedIn,
+    loading: loadStatus === 'loading',
+    savedBooks,
+    isSaved: (id: string) => savedBooks.some((book) => book.sourceId === id),
+    saveBook,
+    setStatus,
+    removeBook,
+  }
+}

@@ -39,6 +39,12 @@
   --color-ring: #818cf8;
   --radius: 0.5rem;
 
+  /* DogEar's semantic type scale and accent. Fonts are loaded in index.html;
+     themes.css overrides --color-sage for each theme that tunes it. */
+  --font-sans: 'DM Sans', 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-serif: 'Fraunces', 'Iowan Old Style', Georgia, 'Times New Roman', serif;
+  --color-sage: #75816A;
+
   /*
    * Map the rounded-* utilities onto --radius so a theme (or you) can change
    * the app's shape language in one place. At the default 0.5rem these equal
@@ -164,7 +170,7 @@
   }
 
   body {
-    font-family: 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-family: var(--font-sans);
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;

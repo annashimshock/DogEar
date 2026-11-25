@@ -57,6 +57,14 @@ test.describe('Smoke tests', () => {
     await expect(page.getByTestId('app-navigation')).toBeVisible({ timeout: 15000 })
   })
 
+  test('discover shows the real home and its search', async ({ page }) => {
+    await page.goto('/home')
+    await expect(page.getByRole('heading', { level: 1 })).toContainText('Every good book')
+    await expect(page.getByRole('searchbox', { name: 'Search books' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Find books' })).toBeVisible()
+    expect(await page.getByText('placeholder page').count()).toBe(0)
+  })
+
   test('sign-in button visible when logged out', async ({ page }) => {
     await page.goto('/home')
     await expect(page.getByTestId('nav-sign-in-button')).toBeVisible({ timeout: 15000 })

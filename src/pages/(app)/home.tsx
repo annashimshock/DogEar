@@ -1,31 +1,27 @@
+/* home pattern: single-column-narrative — search-led discovery above curated shelves. */
 /**
- * Placeholder home page — replace this with the app's real home.
+ * Discover — the front of the bookstore.
  *
- * This is intentionally unstyled scaffolding, not a design to build on.
- * Design the app's own look (layout, theme tokens, typography) from your
- * product's point of view instead of extending this page.
+ * Every cover on this page comes from the Google Books worker route. Curated
+ * shelves are fetched on mount; if the integration is unavailable the shelves
+ * say so rather than filling in invented books.
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useAuthProfileReady } from 'deepspace'
 import { APP_NAME } from '../../constants'
+import { BookCard } from '../../components/books/BookCard'
+import { BookShelf } from '../../components/books/BookShelf'
+import { Button, SearchInput } from '../../components/ui'
+import {
+  BROWSE_TOPICS,
+  CURATED_SHELVES,
+  searchBooks,
+  type Book,
+} from '../../lib/books'
+import { cn } from '../../lib/utils'
 
-interface Book {
-  source: string
-  sourceId: string
-  title: string
-  authors: string[]
-  description: string
-  categories: string[]
-  publishedDate:  string
-  coverUrl: string | null
-}
-
-interface SearchResponse {
-  totalItems: number
-  books: Book[]
-  error?: string
-}
+const FEATURED_QUERY = 'bestseller literary fiction'
 
 export default function HomePage() {
   const { isSignedIn, user } = useAuthProfileReady({ requireUser: true })
@@ -36,183 +32,212 @@ export default function HomePage() {
   const [error, setError] = useState('')
   const [hasSearched, setHasSearched] = useState(false)
 
-  async function handleSearch(event: React.SubmitEvent<HTMLFormElement>) {
-    event.preventDefault()
+  const [shelves, setShelves] = useState<Record<string, Book[]>>({})
+  const [featured, setFeatured] = useState<Book[]>([])
+  const [shelvesLoading, setShelvesLoading] = useState(true)
 
-    if (!query.trim()) return
+  // Fill the shelves from real search results on first visit.
+  useEffect(() => {
+    let cancelled = false
 
+    async function loadShelves() {
+      const jobs = [
+        ...CURATED_SHELVES.map((shelf) => ({ id: shelf.id, query: shelf.query })),
+        { id: 'featured', query: FEATURED_QUERY },
+      ]
+
+      const results = await Promise.all(
+        jobs.map(async ({ id, query: term }) => {
+          try {
+            return [id, await searchBooks(term, 12)] as const
+          } catch {
+            return [id, [] as Book[]] as const
+          }
+        }),
+      )
+
+      if (cancelled) return
+      const next: Record<string, Book[]> = {}
+      for (const [id, found] of results) next[id] = found
+      setShelves(next)
+      setFeatured(next.featured ?? [])
+      setShelvesLoading(false)
+    }
+
+    void loadShelves()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  async function runSearch(term: string) {
+    const trimmed = term.trim()
+    if (!trimmed) return
+
+    setQuery(trimmed)
     setLoading(true)
     setError('')
     setHasSearched(true)
 
     try {
-      const params = new URLSearchParams({
-        q: query.trim(),
-        limit: '20',
-      })
-
-      const response = await fetch(
-        `/api/books/search?${params.toString()}`
-      )
-
-      const data = await response.json() as SearchResponse
-
-      if (!response.ok) {
-        throw new Error(data.error ?? 'Something went wrong.')
-      }
-
-      setBooks(data.books ?? [])
+      setBooks(await searchBooks(trimmed, 24))
     } catch (err) {
       setBooks([])
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'Unable to search for books right now.'
-      )
+      setError(err instanceof Error ? err.message : 'The shelves are unavailable right now.')
     } finally {
       setLoading(false)
     }
   }
 
+  function handleSubmit(event: React.SubmitEvent<HTMLFormElement>) {
+    event.preventDefault()
+    void runSearch(query)
+  }
+
   return (
     <main className="min-h-full bg-background text-foreground">
-      <div className="mx-auto max-w-7xl px-6 py-12 sm:px-10">
-        <section className="mb-12">
-          <p className="mb-3 text-sm font-medium uppercase tracking-[0.2em] text-muted-foreground">
-            Your next favorite book starts here
+      <div className="mx-auto w-full max-w-7xl px-5 pb-16 pt-12 sm:px-8 sm:pt-16 lg:pt-20">
+        {/* Editorial welcome */}
+        <section className="relative max-w-4xl">
+          <p className="mb-4 text-[11px] font-semibold uppercase tracking-[0.28em] text-primary">
+            An independent bookstore, online
           </p>
-
-          <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">
-            Discover something <span className="italic">wonderful.</span>
+          <h1 className="font-serif text-[2.6rem] font-medium leading-[1.08] tracking-tight text-foreground sm:text-6xl lg:text-[4.25rem]">
+            Every good book
+            <br />
+            finds its <span className="italic text-primary">reader.</span>
           </h1>
-
-          <p className="mt-4 max-w-xl text-base leading-relaxed text-muted-foreground">
-            Explore new stories, revisit old favorites, and find
-            your next great read.
+          <p className="mt-6 max-w-xl text-[15px] leading-relaxed text-muted-foreground sm:text-base">
+            Browse the shelves, follow a curiosity, and leave with a story you
+            will want to talk about. {APP_NAME} keeps the browsing human and the
+            recommendations personal.
           </p>
-
           {isSignedIn && user && (
-            <p className="mt-3 text-sm text-muted-foreground">
+            <p className="mt-4 font-serif text-sm italic text-sage">
               Welcome back, {user.name ?? user.email}.
             </p>
           )}
-        </section>
 
-        {/* Search bar */}
-        <section className="mb-14">
-          <form
-            onSubmit={handleSearch}
-            className="flex max-w-2xl gap-3"
-          >
-            <input
-              type="search"
+          <form onSubmit={handleSubmit} className="mt-9 flex max-w-2xl flex-col gap-3 sm:flex-row">
+            <SearchInput
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search by title, author, or genre..."
-              className="min-w-0 flex-1 rounded-xl border border-border bg-card px-5 py-4 text-sm text-foreground outline-none transition focus:border-foreground"
+              onClear={() => setQuery('')}
+              placeholder="A title, an author, a feeling…"
+              aria-label="Search books"
+              className="h-12 flex-1 rounded-full border-border bg-card pl-10 pr-10 text-sm"
             />
-
-            <button
+            <Button
               type="submit"
-              disabled={loading || !query.trim()}
-              className="rounded-xl bg-foreground px-6 py-4 text-sm font-medium text-background transition hover:opacity-85 disabled:cursor-not-allowed disabled:opacity-50"
+              loading={loading}
+              disabled={!query.trim()}
+              className="h-12 shrink-0 rounded-full bg-primary px-7 text-xs font-semibold uppercase tracking-[0.14em] text-primary-foreground hover:bg-primary/90"
             >
-              {loading ? 'Searching...' : 'Search'}
-            </button>
+              Find books
+            </Button>
           </form>
+
+          <div className="mt-6 flex flex-wrap items-center gap-2">
+            <span className="mr-1 text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+              Browse by mood
+            </span>
+            {BROWSE_TOPICS.map((topic) => (
+              <button
+                key={topic.label}
+                type="button"
+                onClick={() => void runSearch(topic.query)}
+                className={cn(
+                  'rounded-full border border-border bg-card px-3 py-1.5 text-[11px] text-muted-foreground transition',
+                  'hover:border-primary hover:text-primary',
+                  hasSearched && query === topic.query && 'border-primary text-primary',
+                )}
+              >
+                {topic.label}
+              </button>
+            ))}
+          </div>
         </section>
 
-        <section>
-          {hasSearched ? (
-            <>
-              <div className="mb-7">
-                <h2 className="text-2xl font-semibold">
-                  Search results
-                </h2>
-                <p className="mt-2 text-sm text-muted-foreground">
-                  {loading
-                    ? 'Finding books for you...'
-                    : `${books.length} books displayed`}
+        <div className="mt-14 h-px w-full bg-border" />
+
+        {/* Search results take over the shelves while active. */}
+        {hasSearched ? (
+          <section className="py-10">
+            <div className="mb-7 flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.2em] text-sage">
+                  From the catalogue
                 </p>
+                <h2 className="font-serif text-3xl text-foreground">“{query}”</h2>
               </div>
-
-              {error && (
-                <p className="rounded-xl border border-border bg-card p-5 text-sm text-destructive">
-                  {error}
-                </p>
-              )}
-
-              {loading && (
-                <p className="py-10 text-sm text-muted-foreground">
-                  Searching Google Books...
-                </p>
-              )}
-
-              {!loading && !error && books.length === 0 && (
-                <p className="py-10 text-sm text-muted-foreground">
-                  No books found. Try another search!
-                </p>
-              )}
-
-              {!loading && !error && books.length > 0 && (
-                <div className="grid grid-cols-2 gap-x-6 gap-y-10 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-                  {books.map((book) => (
-                    <article
-                      key={book.sourceId}
-                      className="group min-w-0"
-                    >
-                      <div className="mb-4 flex aspect-[2/3] items-center justify-center overflow-hidden rounded-lg bg-card">
-                        {book.coverUrl ? (
-                          <img
-                            src={book.coverUrl}
-                            alt={`Cover of ${book.title}`}
-                            className="h-full w-full object-cover shadow-sm transition duration-300 group-hover:scale-[1.03]"
-                          />
-                        ) : (
-                          <div className="px-4 text-center text-sm text-muted-foreground">
-                            No cover available
-                          </div>
-                        )}
-                      </div>
-
-                      <h3 className="line-clamp-2 text-sm font-semibold leading-snug">
-                        {book.title}
-                      </h3>
-
-                      <p className="mt-1 text-sm text-muted-foreground">
-                        {book.authors.join(', ') || 'Unknown author'}
-                      </p>
-
-                      {book.categories.length > 0 && (
-                        <p className="mt-2 text-xs text-muted-foreground">
-                          {book.categories[0]}
-                        </p>
-                      )}
-                    </article>
-                  ))}
-                </div>
-              )}
-            </>
-          ) : (
-            <div className="border-t border-border pt-8">
-              <p className="text-sm font-medium uppercase tracking-widest text-muted-foreground">
-                A world of stories awaits
-              </p>
-
-              <h2 className="mt-3 text-2xl font-semibold">
-                What will you discover?
-              </h2>
-
-              <p className="mt-2 max-w-lg text-sm leading-relaxed text-muted-foreground">
-                Search for a book you've been meaning to read,
-                an author you love, or a genre you'd like to explore.
+              <p className="text-xs text-muted-foreground">
+                {loading ? 'Pulling books from the shelves…' : `${books.length} books found`}
               </p>
             </div>
-          )}
-        </section>
 
-        <footer className="mt-20 border-t border-border pt-6 text-sm text-muted-foreground">
-          {APP_NAME} · Find your next favorite read.
+            {error && (
+              <p role="alert" className="mb-6 rounded-md border border-destructive/30 bg-card p-4 text-sm text-destructive">
+                {error}
+              </p>
+            )}
+
+            {loading ? (
+              <div className="grid grid-cols-2 gap-x-5 gap-y-9 sm:grid-cols-3 lg:grid-cols-5">
+                {Array.from({ length: 10 }, (_, index) => (
+                  <div key={index} className="animate-pulse">
+                    <div className="aspect-[2/3] rounded-sm bg-secondary" />
+                    <div className="mt-3 h-3 w-4/5 rounded bg-secondary" />
+                    <div className="mt-2 h-2 w-3/5 rounded bg-secondary" />
+                  </div>
+                ))}
+              </div>
+            ) : books.length > 0 ? (
+              <div className="grid grid-cols-2 gap-x-5 gap-y-9 sm:grid-cols-3 lg:grid-cols-5">
+                {books.map((book) => (
+                  <BookCard key={`${book.source}:${book.sourceId}`} book={book} />
+                ))}
+              </div>
+            ) : !error ? (
+              <p className="py-12 text-center font-serif text-lg italic text-muted-foreground">
+                Nothing on the shelves for that one. Try a different author or mood.
+              </p>
+            ) : null}
+
+            <button
+              type="button"
+              onClick={() => {
+                setHasSearched(false)
+                setQuery('')
+                setError('')
+              }}
+              className="mt-10 text-xs uppercase tracking-[0.14em] text-primary underline-offset-4 hover:underline"
+            >
+              Back to the shelves
+            </button>
+          </section>
+        ) : (
+          <div>
+            <BookShelf
+              eyebrow="The front table"
+              title="Freshly shelved"
+              books={featured}
+              loading={shelvesLoading}
+            />
+            {CURATED_SHELVES.map((shelf) => (
+              <BookShelf
+                key={shelf.id}
+                eyebrow={shelf.eyebrow}
+                title={shelf.title}
+                books={shelves[shelf.id] ?? []}
+                loading={shelvesLoading}
+              />
+            ))}
+          </div>
+        )}
+
+        <footer className="mt-10 flex flex-col gap-2 border-t border-border pt-6 text-xs text-muted-foreground sm:flex-row sm:justify-between">
+          <span className="font-serif text-sm italic text-foreground">{APP_NAME}</span>
+          <span>A little corner of the internet for people who love books.</span>
         </footer>
       </div>
     </main>

@@ -19,6 +19,9 @@ export const userBooksSchema: CollectionSchema = {
       immutable: true,
     },
     { name: 'bookId', storage: 'text', interpretation: 'plain' },
+    // Snapshot of the Google Books result, so a saved shelf renders without
+    // fetching every cover again. JSON encoded in a text column.
+    { name: 'bookData', storage: 'text', interpretation: 'plain' },
     { name: 'status', storage: 'text', interpretation: 'plain' },
     { name: 'notes', storage: 'text', interpretation: 'plain' },
   ],
