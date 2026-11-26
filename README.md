@@ -50,15 +50,23 @@ The application combines persistent reader preferences, interaction history, cat
 
 ## Technology Stack
 
-| Area | Technology |
-| Frontend | React 19, TypeScript, Vite |
-| Routing | Generouted |
-| Backend | Hono, DeepSpace Worker |
-| Authentication | DeepSpace Auth |
-| Persistent data | DeepSpace RecordRoom |
-| AI | DeepSpace AI |
-| Book catalog | Google Books API |
-| Styling | CSS, custom design tokens |
+Area | Technology 
+
+Frontend | React 19, TypeScript, Vite 
+
+Routing | Generouted 
+
+Backend | Hono, DeepSpace Worker 
+
+Authentication | DeepSpace Auth 
+
+Persistent data | DeepSpace RecordRoom
+
+AI | DeepSpace AI 
+
+Book catalog | Google Books API 
+
+Styling | CSS, custom design tokens
 
 ## Architecture
 
