@@ -68,6 +68,8 @@ Book catalog | Google Books API
 
 Styling | CSS, custom design tokens
 
+---
+
 ## Architecture
 
 DogEar uses a full-stack architecture built around DeepSpace platform primitives.
