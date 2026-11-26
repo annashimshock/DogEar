@@ -16,8 +16,29 @@
  * initial states. `<Seo>` comes first and reads src/seo.ts.
  */
 
-import { Navigate } from 'react-router-dom'
+import { useEffect } from 'react'
+import { Seo } from '../components/Seo'
+import { seo } from '../seo'
 
 export default function Landing() {
-  return <Navigate to="/home" replace />
+  useEffect(() => {
+    window.location.replace('/home')
+  }, [])
+
+  return (
+    <>
+      <Seo {...seo} path="/" />
+      <main className="flex min-h-screen flex-col items-center justify-center px-6 text-center">
+        <p className="text-muted-foreground">
+          Opening DogEar...
+        </p>
+        <a
+          href="/home"
+          className="mt-3 text-primary underline"
+        >
+          Continue to DogEar
+        </a>
+      </main>
+    </>
+  )
 }
