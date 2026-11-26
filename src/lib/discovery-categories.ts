@@ -3,7 +3,7 @@
  *
  * This is the single source of truth for the categories offered during
  * onboarding, the catalogue queries used to build swipe stacks, and the
- * category gate used by For You and the bookseller. Only standalone reading
+ * category gate used by For You and the AI. Only standalone reading
  * categories live here: no periodicals, journals, textbooks, study guides or
  * academic publication types are offered.
  *

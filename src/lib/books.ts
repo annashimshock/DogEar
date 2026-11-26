@@ -171,18 +171,6 @@ export async function searchBooks(
  */
 export const CURATED_SHELVES = [
   {
-    id: 'stay-up',
-    eyebrow: 'The page-turner shelf',
-    title: 'Worth Staying Up For',
-    query: 'bestselling thriller suspense novels',
-  },
-  {
-    id: 'quiet',
-    eyebrow: 'For slow mornings',
-    title: 'Quietly Beautiful',
-    query: 'literary fiction novels friendship family',
-  },
-  {
     id: 'comfort-zone',
     eyebrow: 'A little further afield',
     title: 'A Little Out of Your Comfort Zone',

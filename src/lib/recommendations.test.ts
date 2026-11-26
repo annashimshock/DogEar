@@ -392,7 +392,7 @@ describe('explicit discovery preferences', () => {
     )
   })
 
-  it('states the category hierarchy and temporary request override in bookseller context', () => {
+  it('states the category hierarchy and temporary request override in AI context', () => {
     const context = profileContext(
       profile({ categoryIds: ['fantasy', 'mystery'], liked: [FANTASY] }),
       [],

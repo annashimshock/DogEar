@@ -1,6 +1,6 @@
 /**
  * Recommendation profile and ranking shared by the For You shelf and the
- * bookseller chat.
+ * AI chat.
  *
  * The worker loads `book_interactions` and `user_books` on every generation and
  * scores real Google Books candidates from those rows. Chat requests are a

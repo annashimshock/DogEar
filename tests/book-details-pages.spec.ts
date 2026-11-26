@@ -63,8 +63,10 @@ test.describe('book details across discover surfaces', () => {
     await page.goto('/home')
 
     const shelf = page.locator('section').filter({
-      has: page.getByRole('heading', { name: 'Worth Staying Up For' }),
+      has: page.getByRole('heading', { name: 'Fantasy, Properly Shelved' }),
     })
+    await expect(page.getByRole('heading', { name: 'Worth Staying Up For' })).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Quietly Beautiful' })).toHaveCount(0)
     await expect(page.getByRole('heading', { name: 'Beyond the Story' })).toHaveCount(0)
     await expect(page.getByRole('heading', { name: /freshly\s+shelved/i })).toHaveCount(0)
     await shelf.getByTestId('book-card-details').first().click()
@@ -127,7 +129,7 @@ test.describe('book details across saved and recommended books', () => {
     await page.getByTestId('book-details-close').click()
   })
 
-  test('opens from a bookseller chat recommendation row', async ({ users }) => {
+  test('opens from an AI chat recommendation row', async ({ users }) => {
     const [reader] = await users(1)
     const page = reader.page
     await mockPersonalShelf(page, [])
@@ -144,10 +146,10 @@ test.describe('book details across saved and recommended books', () => {
     })
 
     await page.goto('/for-you')
-    await page.getByRole('textbox', { name: 'Tell the bookseller what you want to read' }).fill(
+    await page.getByRole('textbox', { name: 'Tell the AI what you want to read' }).fill(
       'A mystery I can finish in a weekend',
     )
-    await page.getByRole('button', { name: 'Ask the bookseller' }).click()
+    await page.getByRole('button', { name: 'Ask the AI' }).click()
     await expect(page.getByTestId('chat-book-details')).toBeVisible()
     await page.getByTestId('chat-book-details').click()
     await expectModal(page)

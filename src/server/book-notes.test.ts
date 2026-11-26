@@ -89,7 +89,7 @@ describe('grounded category enforcement', () => {
   })
 })
 
-describe('bookseller JSON parsing', () => {
+describe('AI JSON parsing', () => {
   it('reads JSON returned directly', () => {
     const raw = '{"reply":"Here is a shelf.","queries":["literary fiction"]}'
     expect(parseJsonObject(raw)).toEqual({

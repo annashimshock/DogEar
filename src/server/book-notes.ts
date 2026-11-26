@@ -1,5 +1,5 @@
 /**
- * Parsing for the bookseller's JSON replies.
+ * Parsing for the AI's JSON replies.
  *
  * `generateText()` can put an answer in an earlier step, wrap it in Markdown,
  * or return no text at all. These helpers accept those real response shapes and

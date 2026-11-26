@@ -99,8 +99,8 @@ export function DiscoveryOnboarding({
       </h2>
       <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground">
         Pick the shelves you would like us to reach for first. Choose as many as you like — we
-        will use them to shape your swipe deck, your For You shelf and the bookseller&apos;s
-        suggestions. You can change them any time.
+        will use them to shape your swipe deck, your For You shelf and the AI&apos;s suggestions.
+        You can change them any time.
       </p>
 
       <div className="mt-8 space-y-8">

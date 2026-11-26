@@ -137,9 +137,9 @@ test.describe('For You personalization', () => {
 
     await page.goto('/for-you')
     await page
-      .getByRole('textbox', { name: 'Tell the bookseller what you want to read' })
+      .getByRole('textbox', { name: 'Tell the AI what you want to read' })
       .fill('I want a nonfiction history book about coastlines')
-    await page.getByRole('button', { name: 'Ask the bookseller' }).click()
+    await page.getByRole('button', { name: 'Ask the AI' }).click()
 
     await expect(page.getByTestId('chat-recommendations')).toContainText(HISTORY_BOOK.title)
     await expect(page.getByTestId('chat-recommendations')).toContainText('Nolan Reed')

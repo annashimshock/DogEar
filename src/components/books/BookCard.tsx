@@ -10,7 +10,7 @@ import { BookCover } from './BookCover'
 
 interface BookCardProps {
   book: Book
-  /** Bookseller's note, shown on recommendation cards. */
+  /** AI's note, shown on recommendation cards. */
   reason?: string
   showDescription?: boolean
   /** Library pages manage status inline; browse pages simply save. */

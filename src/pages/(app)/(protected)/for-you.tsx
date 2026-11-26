@@ -2,7 +2,7 @@
  * For You — a persistent recommendation desk.
  *
  * The conversation is stored in the SDK's owner-scoped ai-chats / ai-messages
- * collections. The bookseller endpoint grounds every shelf in Google Books,
+ * collections. The AI endpoint grounds every shelf in Google Books,
  * writes both turns server-side, and keeps each book's reason with the message.
  */
 
@@ -380,7 +380,7 @@ export default function ForYouPage() {
       if (!chatId) chatId = await createChat()
 
       const token = await getAuthToken()
-      if (!token) throw new Error('Sign in to talk with the bookseller.')
+      if (!token) throw new Error('Sign in to talk with the AI.')
 
       const response = await fetch('/api/books/recommend', {
         method: 'POST',
@@ -388,7 +388,7 @@ export default function ForYouPage() {
         body: JSON.stringify({ message, chatId, messageId: userMessageId, preferences }),
       })
       const data = (await response.json()) as RecommendResponse
-      if (!response.ok) throw new Error(data.error ?? 'The bookseller is unavailable right now.')
+      if (!response.ok) throw new Error(data.error ?? 'The AI is unavailable right now.')
 
       setPending({
         userMessageId,
@@ -455,7 +455,7 @@ export default function ForYouPage() {
             A shelf with your <span className="italic text-primary">name on it.</span>
           </h1>
           <p className="mt-5 max-w-xl text-sm leading-relaxed text-muted-foreground sm:text-base">
-            No forms, no star ratings. Just tell our bookseller what you are
+            No forms, no star ratings. Just tell our AI what you are
             looking for, in your own words, and see what comes back.
           </p>
         </header>
@@ -478,7 +478,7 @@ export default function ForYouPage() {
                 </span>
                 <div className="min-w-0">
                   <p className="truncate font-serif text-base leading-none">
-                    {chats.chats.find((chat) => chat.recordId === activeChatId)?.title ?? 'The bookseller'}
+                    {chats.chats.find((chat) => chat.recordId === activeChatId)?.title ?? 'The AI'}
                   </p>
                   <p className="mt-1 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
                     Saved in your conversations
@@ -619,7 +619,7 @@ export default function ForYouPage() {
                       }
                     }}
                     rows={2}
-                    aria-label="Tell the bookseller what you want to read"
+                    aria-label="Tell the AI what you want to read"
                     placeholder="I am in the mood for…"
                     className="min-h-0 flex-1 resize-none border-input bg-background text-[13px] focus-visible:ring-primary/30"
                   />
@@ -628,7 +628,7 @@ export default function ForYouPage() {
                     loading={sending}
                     disabled={!input.trim()}
                     size="icon"
-                    aria-label="Ask the bookseller"
+                    aria-label="Ask the AI"
                     className="size-10 shrink-0 rounded-full bg-primary text-primary-foreground hover:bg-primary/90"
                   >
                     <Send className="size-4" />
@@ -700,7 +700,7 @@ export default function ForYouPage() {
                   “Tell me what you love, and I will find you something to love next.”
                 </p>
                 <p className="mx-auto mt-3 max-w-sm text-xs leading-relaxed text-muted-foreground">
-                  Ask the bookseller, or browse the stack on Discover, and a shelf
+                  Ask the AI, or browse the stack on Discover, and a shelf
                   with a note for each book will appear here.
                 </p>
               </div>

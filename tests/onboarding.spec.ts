@@ -108,7 +108,9 @@ test.describe('Discovery categories', () => {
     }
 
     await expect(page.getByTestId('swipe-discovery')).toBeVisible({ timeout: 15_000 })
-    await expect(page.getByRole('heading', { name: 'Worth Staying Up For' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Fantasy, Properly Shelved' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Worth Staying Up For' })).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Quietly Beautiful' })).toHaveCount(0)
     await expect(page.getByRole('heading', { name: 'Beyond the Story' })).toHaveCount(0)
     await expect(page.getByRole('heading', { name: /freshly\s+shelved/i })).toHaveCount(0)
   })

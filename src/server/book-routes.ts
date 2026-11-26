@@ -1,7 +1,7 @@
 /**
  * Books routes: Google Books search plus grounded, personalized recommendations.
  *
- * The model chooses catalogue queries and writes the bookseller's note; every
+ * The model chooses catalogue queries and writes the AI's note; every
  * returned book comes from Google Books. Conversational turns are persisted to
  * the built-in `ai-chats` / `ai-messages` collections through worker helpers,
  * never through client writes.
@@ -385,7 +385,7 @@ async function recommendGrounded({
     (object) => suggestionFromObject(object) !== null,
   )
   const suggestion = generated.object ? suggestionFromObject(generated.object) : null
-  if (!suggestion) warnUnusableJson('Bookseller response', 'catalogue fallbacks', generated)
+  if (!suggestion) warnUnusableJson('AI response', 'catalogue fallbacks', generated)
 
   const intent = intentForFocus(focus)
   const suggestedQueries = suggestion?.queries ?? []
@@ -439,7 +439,7 @@ async function recommendGrounded({
 }
 
 const BOOKSELLER_BASE = [
-  'You are the bookseller at DogEar, a warm independent bookstore.',
+  "You are DogEar's AI, a thoughtful assistant at a warm independent bookstore.",
   'For readers without a specific request, favor contemporary novels, literary fiction, historical fiction, fantasy, science fiction, mystery, thriller, romance, horror, short-story collections, poetry collections, biography, memoir, accessible history and popular science.',
   DEFAULT_RECOMMENDATION_INTENT,
   'Historical fiction is fiction. Textbooks, course materials, study aids, serials and reference books are never eligible. A reader who explicitly asks for literary criticism, theory or analysis may receive those standalone books for that turn only.',
@@ -558,7 +558,7 @@ export function registerBookRoutes(app: Hono<AppContext>): void {
   })
 
   /**
-   * Bookseller chat. Grounded in Google Books, personalized by the reader's
+   * AI chat. Grounded in Google Books, personalized by the reader's
    * own records, and persisted into the same ai-chats/ai-messages rows the
    * scaffold's chat infrastructure uses.
    */
@@ -593,7 +593,7 @@ export function registerBookRoutes(app: Hono<AppContext>): void {
       }))
       .slice(-10)
     const transcript = [...history, { role: 'user' as const, content: message }]
-      .map((turn) => `${turn.role === 'user' ? 'Reader' : 'Bookseller'}: ${turn.content}`)
+      .map((turn) => `${turn.role === 'user' ? 'Reader' : 'AI'}: ${turn.content}`)
       .join('\n')
 
     const userMessageId =
@@ -637,7 +637,7 @@ export function registerBookRoutes(app: Hono<AppContext>): void {
         // record so a restored chat shows the same shelf with its reasons.
         parts: [{ type: 'dogear.recommendations', reply: result.reply, books: result.books }],
       })
-      if (!assistantOk) throw new Error('Could not persist the bookseller reply')
+      if (!assistantOk) throw new Error('Could not persist the AI reply')
 
       if (!chat.title || chat.title === 'New chat') {
         await updateChat(stub, chatId, auth.userId, { title: deriveChatTitle(message) })
@@ -647,7 +647,7 @@ export function registerBookRoutes(app: Hono<AppContext>): void {
     } catch (error) {
       console.error('Recommendation failed:', error)
       return c.json(
-        { error: 'The bookseller is momentarily unavailable. Try again in a moment.' },
+        { error: 'The AI is momentarily unavailable. Try again in a moment.' },
         502,
       )
     }

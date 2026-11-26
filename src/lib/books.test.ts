@@ -178,6 +178,10 @@ describe('swipe stack generation', () => {
     const shelfTitles = CURATED_SHELVES.map((shelf) => shelf.title)
     expect(shelfIds).toEqual(expect.arrayContaining(['fantasy', 'poetry']))
     expect(shelfIds).not.toContain('nonfiction')
+    expect(shelfIds).not.toContain('stay-up')
+    expect(shelfIds).not.toContain('quiet')
+    expect(shelfTitles).not.toContain('Worth Staying Up For')
+    expect(shelfTitles).not.toContain('Quietly Beautiful')
     expect(shelfTitles).not.toContain('Beyond the Story')
 
     for (const shelf of CURATED_SHELVES) {

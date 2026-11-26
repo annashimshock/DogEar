@@ -1,5 +1,5 @@
 /**
- * Persistent bookseller conversations.
+ * Persistent AI conversations.
  *
  * Chat and message rows live in the SDK's owner-scoped `ai-chats` and
  * `ai-messages` collections. Clients read them through RecordScope; all writes

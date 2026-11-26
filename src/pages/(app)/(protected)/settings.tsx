@@ -37,7 +37,7 @@ export default function SettingsPage() {
             <h3 className="font-serif text-lg text-foreground">Reading shelves</h3>
             <p className="mt-2 text-sm text-muted-foreground">
               Choose the categories DogEar reaches for first in swipe discovery, For You and the
-              bookseller&apos;s suggestions.
+              AI&apos;s suggestions.
             </p>
             <Button variant="secondary" className="mt-4" onClick={() => navigate('/preferences')}>
               Edit reading preferences
