@@ -14,6 +14,7 @@ import { settingsSchema } from './schemas/admin-schema'
 import { booksSchema } from './schemas/books-schema'
 import { userBooksSchema } from './schemas/user-books-schema'
 import { bookInteractionsSchema } from './schemas/book-interactions-schema'
+import { discoveryPreferencesSchema } from './schemas/discovery-preferences-schema'
 
 export const schemas: CollectionSchema[] = [
   usersSchema,
@@ -21,6 +22,7 @@ export const schemas: CollectionSchema[] = [
   booksSchema,
   userBooksSchema,
   bookInteractionsSchema,
+  discoveryPreferencesSchema,
   // Registering these activates the worker's owner-checked chat routes and
   // lets the client subscribe to its own conversations and messages. Writes
   // stay worker-mediated (`create: false`) so message roles cannot be forged.

@@ -7,27 +7,48 @@
  * say so rather than filling in invented books.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useAuthProfileReady } from 'deepspace'
 import { APP_NAME } from '../../constants'
 import { BookCard } from '../../components/books/BookCard'
 import { useBookDetails } from '../../components/books/BookDetailsContext'
 import { BookShelf } from '../../components/books/BookShelf'
 import { SwipeDiscovery } from '../../components/books/SwipeDiscovery'
+import { DiscoveryOnboarding } from '../../components/onboarding/DiscoveryOnboarding'
 import { Button, SearchInput } from '../../components/ui'
 import {
   BROWSE_TOPICS,
   CURATED_SHELVES,
-  searchBooks,
+  DISCOVERY_SHELF_SIZE,
+  DISCOVERY_SEARCH_SIZE,
+  searchDiscoveryBooks,
   type Book,
 } from '../../lib/books'
+import { filterShelfBooks, intentFromText } from '../../lib/book-relevance'
+import {
+  discoveryCategoryLabel,
+  discoveryCategoryQueries,
+} from '../../lib/discovery-categories'
+import { useDiscoveryPreferences } from '../../lib/useDiscoveryPreferences'
 import { cn } from '../../lib/utils'
-
-const FEATURED_QUERY = 'bestseller literary fiction'
 
 export default function HomePage() {
   const { isSignedIn, user } = useAuthProfileReady({ requireUser: true })
   const { openDetails } = useBookDetails()
+  const discovery = useDiscoveryPreferences()
+  const categoryIds = discovery.effectiveCategoryIds
+  const categoryKey = categoryIds.join('|')
+  const personalShelves = useMemo(
+    () =>
+      categoryIds.slice(0, 3).map((id) => ({
+        id: `yours-${id}`,
+        eyebrow: 'From your shelves',
+        title: discoveryCategoryLabel(id),
+        query: discoveryCategoryQueries(id)[0],
+      })),
+    // The joined key keeps this stable across unrelated renders.
+    [categoryKey],
+  )
 
   const [query, setQuery] = useState('')
   const [books, setBooks] = useState<Book[]>([])
@@ -36,7 +57,6 @@ export default function HomePage() {
   const [hasSearched, setHasSearched] = useState(false)
 
   const [shelves, setShelves] = useState<Record<string, Book[]>>({})
-  const [featured, setFeatured] = useState<Book[]>([])
   const [shelvesLoading, setShelvesLoading] = useState(true)
 
   // Fill the shelves from real search results on first visit.
@@ -45,14 +65,14 @@ export default function HomePage() {
 
     async function loadShelves() {
       const jobs = [
+        ...personalShelves,
         ...CURATED_SHELVES.map((shelf) => ({ id: shelf.id, query: shelf.query })),
-        { id: 'featured', query: FEATURED_QUERY },
       ]
 
       const results = await Promise.all(
         jobs.map(async ({ id, query: term }) => {
           try {
-            return [id, await searchBooks(term, 12)] as const
+            return [id, await searchDiscoveryBooks(term, categoryIds, DISCOVERY_SHELF_SIZE)] as const
           } catch {
             return [id, [] as Book[]] as const
           }
@@ -63,7 +83,6 @@ export default function HomePage() {
       const next: Record<string, Book[]> = {}
       for (const [id, found] of results) next[id] = found
       setShelves(next)
-      setFeatured(next.featured ?? [])
       setShelvesLoading(false)
     }
 
@@ -71,7 +90,7 @@ export default function HomePage() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [categoryKey, personalShelves, categoryIds])
 
   async function runSearch(term: string) {
     const trimmed = term.trim()
@@ -83,7 +102,7 @@ export default function HomePage() {
     setHasSearched(true)
 
     try {
-      setBooks(await searchBooks(trimmed, 24))
+      setBooks(await searchDiscoveryBooks(trimmed, categoryIds, DISCOVERY_SEARCH_SIZE))
     } catch (err) {
       setBooks([])
       setError(err instanceof Error ? err.message : 'The shelves are unavailable right now.')
@@ -96,6 +115,10 @@ export default function HomePage() {
     event.preventDefault()
     void runSearch(query)
   }
+
+  // A user-entered search can explicitly ask for literary studies; otherwise
+  // the same default reading policy applies to results as to curated shelves.
+  const visibleBooks = filterShelfBooks(books, categoryIds, intentFromText(query))
 
   return (
     <main className="min-h-full bg-background text-foreground">
@@ -163,7 +186,14 @@ export default function HomePage() {
 
         <div className="mt-14 h-px w-full bg-border" />
 
-        {!hasSearched && <SwipeDiscovery />}
+        {!hasSearched &&
+          (discovery.loading ? (
+            <div className="h-64 animate-pulse rounded-2xl border border-border bg-card" />
+          ) : discovery.needsOnboarding ? (
+            <DiscoveryOnboarding className="mt-2 border-t-0 shadow-none" />
+          ) : (
+            <SwipeDiscovery />
+          ))}
 
         {!hasSearched && <div className="h-px w-full bg-border" />}
 
@@ -178,7 +208,7 @@ export default function HomePage() {
                 <h2 className="font-serif text-3xl text-foreground">“{query}”</h2>
               </div>
               <p className="text-xs text-muted-foreground">
-                {loading ? 'Pulling books from the shelves…' : `${books.length} books found`}
+                {loading ? 'Pulling books from the shelves…' : `${visibleBooks.length} books found`}
               </p>
             </div>
 
@@ -198,9 +228,9 @@ export default function HomePage() {
                   </div>
                 ))}
               </div>
-            ) : books.length > 0 ? (
+            ) : visibleBooks.length > 0 ? (
               <div className="grid grid-cols-2 gap-x-5 gap-y-9 sm:grid-cols-3 lg:grid-cols-5">
-                {books.map((book) => (
+                {visibleBooks.map((book) => (
                   <BookCard
                     key={`${book.source}:${book.sourceId}`}
                     book={book}
@@ -228,19 +258,24 @@ export default function HomePage() {
           </section>
         ) : (
           <div>
-            <BookShelf
-              eyebrow="The front table"
-              title="Freshly shelved"
-              books={featured}
-              loading={shelvesLoading}
-              onOpenDetails={openDetails}
-            />
+            {personalShelves.map((shelf) => (
+              <BookShelf
+                key={shelf.id}
+                eyebrow={shelf.eyebrow}
+                title={shelf.title}
+                books={shelves[shelf.id] ?? []}
+                categoryIds={categoryIds}
+                loading={shelvesLoading}
+                onOpenDetails={openDetails}
+              />
+            ))}
             {CURATED_SHELVES.map((shelf) => (
               <BookShelf
                 key={shelf.id}
                 eyebrow={shelf.eyebrow}
                 title={shelf.title}
                 books={shelves[shelf.id] ?? []}
+                categoryIds={categoryIds}
                 loading={shelvesLoading}
                 onOpenDetails={openDetails}
               />

@@ -11,15 +11,21 @@ import { AuthOverlay } from 'deepspace'
 import { Heart, RotateCcw, Sparkles, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '../ui'
-import { searchBooks, SWIPE_QUERIES, type Book } from '../../lib/books'
+import {
+  searchBooksDetailed,
+  swipeQueryBatch,
+  SWIPE_RESULTS_PER_QUERY,
+  type Book,
+} from '../../lib/books'
 import { applySwipeBatch, type SwipeQueryResults, type SwipeQueueState } from '../../lib/swipe-ranking'
+import { swipeProgress } from '../../lib/swipe-progress'
 import { useBookInteractions, type SwipeAction } from '../../lib/useBookInteractions'
 import { useSavedBooks } from '../../lib/useSavedBooks'
+import { useDiscoveryPreferences } from '../../lib/useDiscoveryPreferences'
 import { BookCover } from './BookCover'
 import { useBookDetails } from './BookDetailsContext'
 
 const SWIPE_THRESHOLD = 110
-const QUERIES_PER_STACK = 4
 
 interface SwipeRecord {
   book: Book
@@ -31,14 +37,20 @@ interface SwipeRecord {
 export function SwipeDiscovery() {
   const saved = useSavedBooks()
   const interactions = useBookInteractions()
+  const preferences = useDiscoveryPreferences()
+  const categoryIds = preferences.effectiveCategoryIds
+  const categoryKey = categoryIds.join('|')
   const { success, error: notifyError } = useToast()
   const { openDetails } = useBookDetails()
 
   const [queue, setQueue] = useState<Book[]>([])
-  const [position, setPosition] = useState(0)
+  const [completed, setCompleted] = useState(0)
   const [batch, setBatch] = useState(0)
+  const [retryCount, setRetryCount] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [stackNotice, setStackNotice] = useState('')
+  const [catalogueExhausted, setCatalogueExhausted] = useState(false)
   const [busy, setBusy] = useState(false)
   const [authOpen, setAuthOpen] = useState(false)
   const [history, setHistory] = useState<SwipeRecord[]>([])
@@ -57,7 +69,7 @@ export function SwipeDiscovery() {
   const mounted = useRef(true)
   const resetToken = useRef(0)
 
-  const dataLoading = saved.loading || interactions.loading
+  const dataLoading = saved.loading || interactions.loading || preferences.loading
   const excludedIds = new Set([
     ...saved.savedBooks.map((book) => book.sourceId),
     ...interactions.interactions.map((book) => book.sourceId),
@@ -82,8 +94,25 @@ export function SwipeDiscovery() {
     }
   }, [])
 
+  // A preference change should produce a deck for the new shelves, not append
+  // to a queue fetched for the old ones.
   useEffect(() => {
-    if (dataLoading) return
+    queueState.current = { queue: [], seenWorks: [] }
+    pendingBatches.current.clear()
+    resetToken.current += 1
+    setQueue([])
+    setCompleted(0)
+    setBatch(0)
+    setHistory([])
+    setCatalogueExhausted(false)
+    setError('')
+    setStackNotice('')
+  }, [categoryKey])
+
+  const queryBatch = swipeQueryBatch(batch, categoryIds)
+
+  useEffect(() => {
+    if (dataLoading || preferences.needsOnboarding) return
 
     // Reuse an in-flight request instead of firing a second copy for the same
     // batch when a record hook briefly flips its loading state.
@@ -94,41 +123,101 @@ export function SwipeDiscovery() {
         activeLoads.current += 1
         setLoading(true)
         setError('')
-        const queries = SWIPE_QUERIES.slice(batch * QUERIES_PER_STACK, (batch + 1) * QUERIES_PER_STACK)
-
-        if (queries.length === 0) return
+        setStackNotice('')
+        setCatalogueExhausted(false)
 
         try {
-          const results = await Promise.all(
-            queries.map(async (query) => {
-              try {
-                return await searchBooks(query.query, 20)
-              } catch {
-                return [] as Book[]
-              }
-            }),
+          const { queries, startIndex } = swipeQueryBatch(batch, categoryIds)
+          if (queries.length === 0) return
+
+          const outcomes = await Promise.all(
+            queries.map(async (query) => ({
+              query,
+              outcome: await searchBooksDetailed(
+                query.query,
+                SWIPE_RESULTS_PER_QUERY,
+                startIndex,
+                undefined,
+                categoryIds,
+              ),
+            })),
           )
 
           if (!mounted.current || token !== resetToken.current) return
-          if (results.every((items) => items.length === 0)) {
+
+          const failed = outcomes.filter(({ outcome }) => !outcome.ok)
+          if (failed.length === outcomes.length) {
             setError('Google Books could not be reached. Please try again in a moment.')
             return
           }
 
-          const fetched: SwipeQueryResults[] = queries.map((query, index) => ({
+          const rawCount = outcomes.reduce((sum, { outcome }) => sum + outcome.totalItems, 0)
+          const eligibleCount = outcomes.reduce(
+            (sum, { outcome }) => sum + outcome.eligibleCount,
+            0,
+          )
+          const relevantCount = outcomes.reduce(
+            (sum, { outcome }) => sum + outcome.relevantCount,
+            0,
+          )
+          const categoryCount = outcomes.reduce(
+            (sum, { outcome }) => sum + outcome.books.length,
+            0,
+          )
+          const fetched: SwipeQueryResults[] = outcomes.map(({ query, outcome }) => ({
             query,
-            books: results[index] ?? [],
+            books: outcome.books,
           }))
+          const previousCount = queueState.current.queue.length
           const profile = latestProfile.current
           const next = applySwipeBatch(queueState.current, fetched, {
             excludedIds: profile.excludedIds,
             liked: profile.liked,
             passed: profile.passed,
             saved: profile.saved,
+            categoryIds,
           })
           queueState.current = next
           setQueue(next.queue)
-          if (batch === 0) setPosition(0)
+          setCompleted((value) => Math.min(value, next.queue.length))
+          if (batch === 0 && previousCount === 0) setCompleted(0)
+
+          const freshCount = next.queue.length - previousCount
+          if (freshCount === 0) {
+            if (failed.length > 0) {
+              setStackNotice(
+                'Some shelves could not be reached. Try this stack again in a moment.',
+              )
+            } else if (rawCount === 0) {
+              setStackNotice('No books matched this part of the catalogue.')
+            } else if (eligibleCount === 0) {
+              setStackNotice(
+                'Google Books returned only journals, course material or incomplete records here.',
+              )
+            } else if (relevantCount === 0) {
+              setStackNotice('Google Books returned eligible records here, but none fit a reading shelf.')
+            } else if (categoryCount === 0) {
+              setStackNotice('These records did not match the shelves you chose, so we left them out.')
+            } else {
+              setStackNotice('Every eligible book here is already in your stack or library.')
+            }
+          }
+
+          // A strict category gate can leave a page nearly empty. Move to a
+          // different query/page instead of filling the stack with unrelated
+          // books or repeatedly requesting the same result window.
+          if (
+            queryBatch.hasMorePages &&
+            failed.length === 0 &&
+            rawCount > 0 &&
+            freshCount < 3 &&
+            mounted.current
+          ) {
+            setCatalogueExhausted(false)
+            setBatch((value) => value + 1)
+          } else {
+            setCatalogueExhausted(!queryBatch.hasMorePages && failed.length === 0)
+          }
         } finally {
           activeLoads.current = Math.max(0, activeLoads.current - 1)
           if (mounted.current && activeLoads.current === 0) setLoading(false)
@@ -143,12 +232,12 @@ export function SwipeDiscovery() {
     }
     // The record hooks are deliberately included so their first ready state can
     // unblock the fetch; pendingBatches prevents a duplicate request.
-  }, [batch, dataLoading])
+  }, [batch, categoryKey, dataLoading, preferences.needsOnboarding, retryCount])
 
-  const current = queue[position]
-  const remaining = Math.max(0, queue.length - position)
-  const hasMoreStacks = (batch + 1) * QUERIES_PER_STACK < SWIPE_QUERIES.length
-  const progress = queue.length > 0 ? Math.min(100, ((position + 1) / queue.length) * 100) : 0
+  // The visible card is not completed yet; it is one of the remaining books.
+  const progress = swipeProgress(queue.length, completed)
+  const current = queue[progress.completed]
+  const hasMoreStacks = queryBatch.hasMorePages && !catalogueExhausted
 
   async function swipe(action: SwipeAction) {
     if (!current || busy) return
@@ -169,7 +258,7 @@ export function SwipeDiscovery() {
         ...entries,
         { book: current, action, interactionId, savedBySwipe: !alreadySaved },
       ])
-      setPosition((value) => value + 1)
+      setCompleted((value) => value + 1)
       setDragX(0)
       setDragging(false)
 
@@ -196,7 +285,7 @@ export function SwipeDiscovery() {
       await interactions.undoSwipe(last.interactionId)
       if (last.action === 'like' && last.savedBySwipe) await saved.removeBook(last.book.sourceId)
       setHistory((entries) => entries.slice(0, -1))
-      setPosition((value) => Math.max(0, value - 1))
+      setCompleted((value) => Math.max(0, value - 1))
       setDragX(0)
       success('Swipe undone', `“${last.book.title}” is back in your stack.`)
     } catch (err) {
@@ -250,6 +339,21 @@ export function SwipeDiscovery() {
     dragged.current = false
   }
 
+  if (preferences.needsOnboarding) {
+    return (
+      <section
+        data-testid="swipe-discovery"
+        aria-label="Swipe discovery"
+        className="border-t border-border py-12 sm:py-14"
+      >
+        <p className="font-serif text-xl text-foreground">Choose a few shelves first.</p>
+        <p className="mt-2 text-sm text-muted-foreground">
+          Your first swipe deck is built from the categories you pick.
+        </p>
+      </section>
+    )
+  }
+
   return (
     <section
       data-testid="swipe-discovery"
@@ -272,13 +376,13 @@ export function SwipeDiscovery() {
         {!loading && queue.length > 0 && (
           <div className="min-w-32 flex-1 sm:max-w-52">
             <div className="mb-1.5 flex justify-between text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-              <span>{position + 1} of {queue.length}</span>
-              <span>{remaining} left</span>
+              <span>{progress.completed} of {progress.total}</span>
+              <span>{progress.remaining} left</span>
             </div>
             <div className="h-1 overflow-hidden rounded-full bg-secondary">
               <div
                 className="h-full rounded-full bg-primary transition-[width] duration-500"
-                style={{ width: `${progress}%` }}
+                style={{ width: `${progress.percent}%` }}
               />
             </div>
           </div>
@@ -299,12 +403,14 @@ export function SwipeDiscovery() {
             <button
               type="button"
               onClick={() => {
+                // Retry this batch in place: a failed page must not throw away
+                // cards the reader has already swiped.
                 resetToken.current += 1
-                queueState.current = { queue: [], seenWorks: [] }
-                pendingBatches.current.clear()
-                setQueue([])
-                setPosition(0)
-                setBatch(0)
+                pendingBatches.current.delete(batch)
+                setError('')
+                setStackNotice('')
+                setCatalogueExhausted(false)
+                setRetryCount((value) => value + 1)
               }}
               className="mt-5 rounded-full border border-primary px-5 py-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-primary hover:bg-primary hover:text-primary-foreground"
             >
@@ -424,11 +530,11 @@ export function SwipeDiscovery() {
         ) : (
           <div data-testid="swipe-empty" className="w-full rounded-lg border border-dashed border-border bg-card/60 px-6 py-14 text-center">
             <p className="font-serif text-xl italic text-foreground">
-              That is the whole stack, for now.
+              {hasMoreStacks ? 'That is the end of this stack.' : 'That is the whole stack, for now.'}
             </p>
             <p className="mx-auto mt-2 max-w-sm text-xs leading-relaxed text-muted-foreground">
-              Your likes and passes are safely noted. Come back later, or pull a
-              fresh stack from another corner of the catalogue.
+              {stackNotice ||
+                'Your likes and passes are safely noted. Come back later, or pull a fresh stack from another corner of the catalogue.'}
             </p>
             {hasMoreStacks ? (
               <button

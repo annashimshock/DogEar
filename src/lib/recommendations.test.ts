@@ -14,6 +14,7 @@ import {
   type ReaderProfile,
 } from './recommendations'
 import { buildPreferenceSummary } from './preferences'
+import { DISCOVERY_CATEGORY_IDS } from './discovery-categories'
 
 function book(title: string, categories: string[], authors: string[] = ['Ada Author']): Book {
   return {
@@ -27,18 +28,28 @@ function book(title: string, categories: string[], authors: string[] = ['Ada Aut
     coverUrl: 'https://example.com/cover.jpg',
     averageRating: 4.4,
     ratingsCount: 220,
+    printType: 'BOOK',
+    publisher: 'DogEar Test Press',
+    industryIdentifiers: [{ type: 'ISBN_13', identifier: '9780143127741' }],
   }
 }
 
 const FANTASY = book('The Paper Crown', ['Fiction', 'Fantasy'], ['Rowan Vale'])
 const FANTASY_TWO = book('The Glass Gate', ['Fantasy'], ['Rowan Vale'])
 const LITERARY = book('Quiet Rooms', ['Fiction', 'Literary Fiction'], ['Mara Fields'])
+const MYSTERY = book('The Velvet Alibi', ['Fiction', 'Mystery'], ['Nora Vale'])
 const HISTORICAL = book('The Long Winter', ['Fiction', 'Historical Fiction'], ['Iris Hale'])
 const HISTORY = book('A History of Coastlines', ['History'], ['Nolan Reed'])
 const TEXTBOOK = book('World History Textbook', ['Education', 'History'], ['Exam Board'])
 
 function profile(partial: Partial<ReaderProfile> = {}): ReaderProfile {
-  return { liked: [], passed: [], saved: [], ...partial }
+  return {
+    liked: [],
+    passed: [],
+    saved: [],
+    categoryIds: DISCOVERY_CATEGORY_IDS,
+    ...partial,
+  }
 }
 
 function noFocus() {
@@ -69,23 +80,35 @@ describe('reader profile data flow', () => {
         bookData: JSON.stringify(FANTASY_TWO),
       },
     ]
+    const preferences = [
+      {
+        userId: 'reader-1',
+        categoryIds: JSON.stringify(['fantasy', 'mystery']),
+        version: 1,
+        onboardingCompleted: 'true',
+      },
+    ]
     const execute = vi.fn(async (toolName: string, params: Record<string, unknown>) => {
       const collection = params.collection
       if (toolName !== 'records.query') throw new Error(`unexpected tool ${toolName}`)
       expect(params.where).toEqual({ userId: 'reader-1' })
+      const rows =
+        collection === 'book_interactions'
+          ? interactions
+          : collection === 'user_books'
+            ? saved
+            : preferences
       return {
         success: true,
         data: {
-          records: (collection === 'book_interactions' ? interactions : saved).map((data, index) => ({
-            recordId: `row-${index}`,
-            data,
-          })),
+          records: rows.map((data, index) => ({ recordId: `row-${index}`, data })),
         },
       }
     })
 
     const first = await loadReaderProfile(execute, 'reader-1')
-    expect(execute).toHaveBeenCalledTimes(2)
+    expect(execute).toHaveBeenCalledTimes(3)
+    expect(first.categoryIds).toEqual(['fantasy', 'mystery'])
     expect(first.liked.map((item) => item.title)).toEqual(['The Paper Crown'])
     expect(first.passed.map((item) => item.title)).toEqual(['Quiet Rooms'])
     expect(first.saved).toEqual([{ ...FANTASY_TWO, status: 'reading' }])
@@ -150,7 +173,10 @@ describe('recommendation quality', () => {
     const likedFantasy = book('A Different Crown', ['Fantasy'], ['Rowan Vale'])
     const likedFantasyTwo = book('Another Gate', ['Fiction', 'Fantasy'], ['Rowan Vale'])
     const likedFantasyThree = book('Third Vale Tale', ['Fantasy'], ['Rowan Vale'])
-    const fantasyLikes = profile({ liked: [likedFantasy, likedFantasyTwo, likedFantasyThree] })
+    const fantasyLikes = profile({
+      liked: [likedFantasy, likedFantasyTwo, likedFantasyThree],
+      categoryIds: ['fantasy'],
+    })
     const anotherFantasy = book('The Hidden Tower', ['Fantasy'], ['Rowan Vale'])
     const candidates = [LITERARY, FANTASY, anotherFantasy, HISTORY]
     const ranked = rankRecommendations(candidates, fantasyLikes)
@@ -172,8 +198,10 @@ describe('recommendation quality', () => {
         book('Passed Two', ['Historical Fiction'], ['Iris Hale']),
         book('Passed Three', ['Historical Fiction'], ['Iris Hale']),
       ],
+      categoryIds: ['fantasy', 'history'],
     })
-    const before = scoreCandidate(HISTORICAL, profile(), noFocus())
+    const baseline = profile({ categoryIds: ['fantasy', 'history'] })
+    const before = scoreCandidate(HISTORICAL, baseline, noFocus())
     const after = scoreCandidate(HISTORICAL, passed, noFocus())
     expect(after).toBeLessThan(before)
 
@@ -195,7 +223,7 @@ describe('recommendation quality', () => {
 
     const academicFocus = detectRequestFocus('I need a history textbook for my course')
     expect(academicFocus.academic).toBe(true)
-    expect(rankRecommendations([TEXTBOOK, HISTORY], profile(), { focus: academicFocus })).toContainEqual(
+    expect(rankRecommendations([TEXTBOOK, HISTORY], profile(), { focus: academicFocus })).not.toContainEqual(
       TEXTBOOK,
     )
   })
@@ -224,20 +252,155 @@ describe('recommendation quality', () => {
     expect(fallbackQueries(scienceFiction)[0]).toContain('fiction')
   })
 
-  it('demotes scholarly publications without hiding relevant science', () => {
+  it('keeps literary scholarship off default and unrelated recommendation shelves', () => {
     const scholarly = book('Studies in Modern Literature', ['Literary Criticism'], ['A. Scholar'])
     const science = book('The Nature of Stars', ['Science', 'Nature'], ['N. Reed'])
-    const ranked = rankRecommendations([scholarly, science], profile(), {
-      focus: detectRequestFocus('accessible science books'),
-    })
+    const scienceFocus = detectRequestFocus('accessible science books')
+    const ranked = rankRecommendations([scholarly, science], profile(), { focus: scienceFocus })
     expect(ranked[0].title).toBe('The Nature of Stars')
-    expect(ranked).toContainEqual(scholarly)
+    expect(ranked).not.toContainEqual(scholarly)
+  })
+
+  it('filters serials and course material before preference ranking', () => {
+    const journal = book('Coastal Journal', ['Periodicals'], ['Editorial Board'])
+    journal.subtitle = 'Volume 14, Issue 2'
+    journal.industryIdentifiers = [{ type: 'ISSN', identifier: '0022-2836' }]
+    journal.averageRating = 5
+    journal.ratingsCount = 100_000
+    const thesis = book('Coastal Thesis', ['Thesis'], ['Graduate Student'])
+    const examPrep = book('GRE Exam Preparation', ['Test Preparation'], ['Exam Board'])
+    const poetry = book('Devotions', ['Poetry'], ['Mary Oliver'])
+    const popularScience = book('The Nature of Stars', ['Popular Science'], ['N. Reed'])
+    const academicFocus = detectRequestFocus('I need a science textbook for my course')
+
+    const ranked = rankRecommendations(
+      [journal, thesis, examPrep, poetry, popularScience],
+      profile(),
+      { focus: academicFocus },
+    )
+    expect(ranked.map((item) => item.title)).toEqual(['The Nature of Stars', 'Devotions'])
+  })
+
+  it('keeps academic literary subjects out of default fiction shelves', () => {
+    const novel = book('A Quiet Novel', ['Fiction', 'Literary Fiction'])
+    const criticism = book('The Rise of the Novel', ['Literary Criticism', 'History'], ['Ian Watt'])
+    const theory = book('Literary Theory: An Introduction', ['Literary Criticism'], ['A. Scholar'])
+    const poetryAnalysis = book(
+      'Understanding Poetry: A Study Guide',
+      ['Poetry', 'Education'],
+      ['A. Scholar'],
+    )
+
+    const ranked = rankRecommendations([criticism, theory, poetryAnalysis, novel], profile())
+    expect(ranked.map((item) => item.title)).toEqual(['A Quiet Novel'])
+  })
+
+  it('allows eligible literary scholarship only when it is explicitly requested', () => {
+    const criticism = book('Studies of the Novel', ['History'], ['Ian Watt'])
+    criticism.description = 'A scholarly study of the development of the English novel.'
+    const theory = book('Poetry and Theory', ['Poetry'], ['A. Scholar'])
+    theory.description = 'A scholarly analysis of poetic theory and its readers.'
+    const excluded = book('Literary Theory: An Introduction', ['Literary Criticism'], ['A. Scholar'])
+    const poetry = book('Devotions', ['Poetry'], ['Mary Oliver'])
+    const focus = detectRequestFocus('I want books about literary criticism and literary theory')
+
+    expect(focus.literaryStudies).toBe(true)
+    expect(rankRecommendations([criticism, theory, poetry, TEXTBOOK], profile()).map((item) => item.title)).toEqual(
+      expect.not.arrayContaining(['Studies of the Novel', 'Poetry and Theory']),
+    )
+    const ranked = rankRecommendations([criticism, theory, excluded, poetry, TEXTBOOK], profile(), {
+      focus,
+      maxBooks: 8,
+    })
+    expect(ranked.map((item) => item.title)).toEqual(
+      expect.arrayContaining(['Studies of the Novel', 'Poetry and Theory']),
+    )
+    expect(ranked).not.toContainEqual(excluded)
+    expect(ranked).not.toContainEqual(TEXTBOOK)
+  })
+
+  it('keeps poetry collections, author biographies and general-interest nonfiction relevant', () => {
+    const poetry = book('Devotions', ['Poetry'], ['Mary Oliver'])
+    const biography = book('Virginia Woolf: A Biography', ['Biography'], ['M. Carlson'])
+    const popularScience = book('The Nature of Stars', ['Popular Science'], ['N. Reed'])
+    const history = book('A Short History of Coastlines', ['History'], ['N. Reed'])
+
+    const ranked = rankRecommendations(
+      [poetry, biography, popularScience, history],
+      profile(),
+      { maxBooks: 8 },
+    )
+    expect(ranked.map((item) => item.title).sort()).toEqual(
+      [poetry, biography, popularScience, history].map((item) => item.title).sort(),
+    )
   })
 
   it('keeps chat hints out of the behavioral profile', () => {
     const context = profileContext(profile(), ['I like history'], noFocus())
     expect(context).toContain('Liked: none')
     expect(context).toContain('Earlier chat topics (context only')
+  })
+})
+
+describe('explicit discovery preferences', () => {
+  it('puts chosen shelves ahead of behavior-derived taste by default', () => {
+    const reader = profile({
+      categoryIds: ['fantasy', 'mystery'],
+      liked: [book('A Loved History', ['History'], ['Nolan Reed'])],
+    })
+    const anotherHistory = book('A Second History', ['History'], ['Nolan Reed'])
+    const ranked = rankRecommendations(
+      [HISTORY, anotherHistory, FANTASY, MYSTERY, LITERARY],
+      reader,
+    )
+
+    expect(ranked.slice(0, 2).map((item) => item.title)).toEqual(
+      expect.arrayContaining([FANTASY.title, MYSTERY.title]),
+    )
+    expect(ranked.map((item) => item.title)).not.toContain(HISTORY.title)
+    expect(ranked.map((item) => item.title)).not.toContain(LITERARY.title)
+  })
+
+  it('keeps persisted categories when a stale client snapshot sends different ones', () => {
+    const submitted = buildPreferenceSummary('reader-1', [], [], [], ['fantasy'])
+    const merged = mergeProfile(profile({ categoryIds: ['history'] }), submitted)
+    expect(merged.categoryIds).toEqual(['history'])
+    expect(mergeProfile(profile({ categoryIds: [] }), submitted).categoryIds).toEqual(['fantasy'])
+  })
+
+  it('uses chosen shelves for default fallback searches', () => {
+    expect(fallbackQueries(noFocus(), ['history', 'poetry'])).toEqual([
+      'narrative history',
+      'poetry collection poems',
+      'modern history nonfiction',
+    ])
+    expect(fallbackQueries(noFocus(), ['fantasy']).every((query) => /fantasy/i.test(query))).toBe(
+      true,
+    )
+  })
+
+  it('overrides chosen shelves for an explicit request without changing saved preferences', () => {
+    const reader = profile({ categoryIds: ['history'] })
+    const focus = detectRequestFocus('I want fantasy novels')
+    const ranked = rankRecommendations([HISTORY, FANTASY, MYSTERY], reader, { focus })
+
+    expect(ranked.map((item) => item.title)).toEqual([FANTASY.title])
+    expect(reader.categoryIds).toEqual(['history'])
+    expect(fallbackQueries(focus, reader.categoryIds)).not.toContain('narrative history')
+    expect(fallbackQueries(focus, reader.categoryIds).some((query) => /fiction/i.test(query))).toBe(
+      true,
+    )
+  })
+
+  it('states the category hierarchy and temporary request override in bookseller context', () => {
+    const context = profileContext(
+      profile({ categoryIds: ['fantasy', 'mystery'], liked: [FANTASY] }),
+      [],
+      noFocus(),
+    )
+    expect(context).toContain("Reader's chosen shelves (highest general priority): Fantasy, Mystery")
+    expect(context.indexOf('chosen shelves first')).toBeLessThan(context.indexOf('Liked:'))
+    expect(context).toContain('overrides the chosen shelves for this turn only')
   })
 })
 

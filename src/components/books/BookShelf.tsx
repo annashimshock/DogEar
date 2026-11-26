@@ -1,6 +1,8 @@
 import { useRef } from 'react'
 import { ArrowLeft, ArrowRight } from 'lucide-react'
 import type { Book } from '../../lib/books'
+import { filterShelfBooks } from '../../lib/book-relevance'
+import type { DiscoveryCategoryId } from '../../lib/discovery-categories'
 import { BookCard } from './BookCard'
 
 interface BookShelfProps {
@@ -8,6 +10,7 @@ interface BookShelfProps {
   title: string
   books: Book[]
   reasonById?: Record<string, string>
+  categoryIds?: readonly DiscoveryCategoryId[] | null
   loading?: boolean
   emptyMessage?: string
   onOpenDetails?: (book: Book) => void
@@ -19,11 +22,14 @@ export function BookShelf({
   title,
   books,
   reasonById,
+  categoryIds,
   loading = false,
   emptyMessage = 'This shelf is being restocked. Check back soon.',
   onOpenDetails,
 }: BookShelfProps) {
   const scroller = useRef<HTMLDivElement>(null)
+  // Curated shelves are default reading shelves: eligibility alone is not enough.
+  const visibleBooks = filterShelfBooks(books, categoryIds)
 
   function scroll(direction: -1 | 1) {
     scroller.current?.scrollBy({ left: direction * 560, behavior: 'smooth' })
@@ -42,7 +48,7 @@ export function BookShelf({
             {title}
           </h2>
         </div>
-        {books.length > 0 && (
+        {visibleBooks.length > 0 && (
           <div className="hidden shrink-0 gap-2 sm:flex">
             <button
               type="button"
@@ -76,7 +82,7 @@ export function BookShelf({
                 <div className="mt-2 h-2 w-3/5 animate-pulse rounded bg-secondary" />
               </div>
             ))
-          : books.map((book) => (
+          : visibleBooks.map((book) => (
               <BookCard
                 key={`${book.source}:${book.sourceId}`}
                 book={book}
@@ -87,7 +93,7 @@ export function BookShelf({
             ))}
       </div>
 
-      {!loading && books.length === 0 && (
+      {!loading && visibleBooks.length === 0 && (
         <p className="py-6 text-sm italic text-muted-foreground">{emptyMessage}</p>
       )}
     </section>

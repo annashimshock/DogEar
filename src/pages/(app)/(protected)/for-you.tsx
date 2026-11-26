@@ -24,8 +24,19 @@ import { useBookDetails } from '../../../components/books/BookDetailsContext'
 import { BookCover } from '../../../components/books/BookCover'
 import { Button, ConfirmModal, Textarea, cn, useToast } from '../../../components/ui'
 import type { Book } from '../../../lib/books'
+import {
+  filterShelfBooks,
+  intentFromText,
+  isLiteraryStudiesRequest,
+} from '../../../lib/book-relevance'
+import {
+  DEFAULT_DISCOVERY_CATEGORY_IDS,
+  discoveryCategoryIdsFromText,
+  type DiscoveryCategoryId,
+} from '../../../lib/discovery-categories'
 import { buildPreferenceSummary, type PreferenceSummary } from '../../../lib/preferences'
 import { useBookInteractions } from '../../../lib/useBookInteractions'
+import { useDiscoveryPreferences } from '../../../lib/useDiscoveryPreferences'
 import { useRecommendationChats, type ChatSummary } from '../../../lib/useRecommendationChats'
 import { useSavedBooks } from '../../../lib/useSavedBooks'
 
@@ -80,6 +91,25 @@ function dateLabel(value: string): string {
   if (!value) return ''
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+/**
+ * The worker already gates shelves; re-check with the intent and active shelves
+ * of this turn. A named shelf overrides saved choices for display only.
+ */
+function recommendedBooks(
+  books: readonly RecommendedBook[] | undefined,
+  requestText = '',
+  savedCategoryIds: readonly DiscoveryCategoryId[] = DEFAULT_DISCOVERY_CATEGORY_IDS,
+): RecommendedBook[] {
+  const intent = intentFromText(requestText)
+  const requested = discoveryCategoryIdsFromText(requestText)
+  const categoryIds = isLiteraryStudiesRequest(requestText)
+    ? null
+    : requested.length > 0
+      ? requested
+      : savedCategoryIds
+  return filterShelfBooks(books ?? [], categoryIds, intent)
 }
 
 interface HistoryPanelProps {
@@ -185,6 +215,7 @@ export default function ForYouPage() {
 
   const saved = useSavedBooks()
   const interactions = useBookInteractions()
+  const discovery = useDiscoveryPreferences()
   const chats = useRecommendationChats()
   const { activeChatId, setActiveChat, createChat, deleteChat } = chats
 
@@ -207,8 +238,9 @@ export default function ForYouPage() {
         saved.savedBooks,
         interactions.interactions,
         recentRequests,
+        discovery.effectiveCategoryIds,
       ),
-    [userId, saved.savedBooks, interactions.interactions, recentRequests],
+    [userId, saved.savedBooks, interactions.interactions, recentRequests, discovery.effectiveCategoryIds],
   )
   const preferenceKey = JSON.stringify(preferences)
 
@@ -234,17 +266,22 @@ export default function ForYouPage() {
     limit: 200,
   })
 
+  let lastUserText = ''
   const messages: DisplayTurn[] = messageRecords
     .filter((record) => record.data.role === 'user' || record.data.role === 'assistant')
     .map((record) => {
+      const isUser = record.data.role === 'user'
+      if (isUser) lastUserText = record.data.content
       const part = Array.isArray(record.data.parts)
         ? record.data.parts.find((entry) => entry?.type === 'dogear.recommendations')
         : undefined
       return {
         id: record.recordId,
-        role: record.data.role === 'user' ? 'user' : 'assistant',
+        role: isUser ? 'user' : 'assistant',
         content: record.data.content,
-        books: part?.books ?? [],
+        books: isUser
+          ? []
+          : recommendedBooks(part?.books, lastUserText, discovery.effectiveCategoryIds),
       }
     })
 
@@ -256,7 +293,7 @@ export default function ForYouPage() {
         id: pending.assistantId,
         role: 'assistant',
         content: pending.reply ?? '',
-        books: pending.books ?? [],
+        books: recommendedBooks(pending.books, pending.message, discovery.effectiveCategoryIds),
       })
     }
   }
@@ -302,7 +339,7 @@ export default function ForYouPage() {
         const data = (await response.json()) as RecommendResponse
         if (!response.ok) throw new Error(data.error ?? 'Could not build your shelf.')
         if (cancelled) return
-        setPersonalBooks(data.books ?? [])
+        setPersonalBooks(recommendedBooks(data.books, '', discovery.effectiveCategoryIds))
         setPersonalBasis(data.basis ?? 'starter')
       } catch (err) {
         if (!cancelled) {
@@ -319,7 +356,14 @@ export default function ForYouPage() {
       cancelled = true
     }
     // preferenceKey reflects the actual library/swipe content, not just identity.
-  }, [userId, preferenceKey, refreshCount, saved.loading, interactions.loading])
+  }, [
+    userId,
+    preferenceKey,
+    refreshCount,
+    saved.loading,
+    interactions.loading,
+    discovery.effectiveCategoryIds,
+  ])
 
   async function ask(question: string) {
     const message = question.trim()
@@ -351,7 +395,7 @@ export default function ForYouPage() {
         message,
         assistantId: data.assistantId,
         reply: data.reply,
-        books: data.books,
+        books: recommendedBooks(data.books, message, discovery.effectiveCategoryIds),
       })
     } catch (err) {
       setPending(null)

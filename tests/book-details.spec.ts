@@ -32,6 +32,8 @@ const DETAIL_BOOK = {
   publisher: 'DogEar Press',
   language: 'en',
   pageCount: 344,
+  printType: 'BOOK',
+  industryIdentifiers: [{ type: 'ISBN_13', identifier: '9781250301697' }],
 }
 
 async function mockSwipeBook(page: Page) {
@@ -112,7 +114,7 @@ test.describe('book details modal', () => {
 
     await page.getByTestId('book-details-close').click()
     await expect(page.getByTestId('swipe-card')).toContainText(DETAIL_BOOK.title)
-    await expect(page.getByText('1 of 1', { exact: true })).toBeVisible()
+    await expect(page.getByText('0 of 1', { exact: true })).toBeVisible()
     await expect(page.getByTestId('swipe-like')).toBeVisible()
   })
 })

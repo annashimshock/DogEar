@@ -23,6 +23,8 @@ const DETAIL_BOOK = {
   publisher: 'DogEar Press',
   language: 'en',
   pageCount: 336,
+  printType: 'BOOK',
+  industryIdentifiers: [{ type: 'ISBN_13', identifier: '9781250301697' }],
 }
 
 const RECOMMENDED = { ...DETAIL_BOOK, reason: 'A mystery in a category you enjoy.' }
@@ -61,8 +63,10 @@ test.describe('book details across discover surfaces', () => {
     await page.goto('/home')
 
     const shelf = page.locator('section').filter({
-      has: page.getByRole('heading', { name: 'Freshly shelved' }),
+      has: page.getByRole('heading', { name: 'Worth Staying Up For' }),
     })
+    await expect(page.getByRole('heading', { name: 'Beyond the Story' })).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: /freshly\s+shelved/i })).toHaveCount(0)
     await shelf.getByTestId('book-card-details').first().click()
     await expectModal(page)
     expect(page.url()).toContain('/home')

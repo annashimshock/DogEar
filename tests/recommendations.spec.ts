@@ -25,6 +25,8 @@ const LIKED_CANDIDATE = {
   publisher: 'DogEar Press',
   language: 'en',
   pageCount: 336,
+  printType: 'BOOK',
+  industryIdentifiers: [{ type: 'ISBN_13', identifier: '9781250301697' }],
 }
 
 const PASSED_CANDIDATE = {
@@ -51,6 +53,7 @@ interface PreferenceBody {
     passed?: string[]
     saved?: { title: string; status: string }[]
     excludedIds?: string[]
+    categoryIds?: string[]
   }
 }
 
@@ -99,7 +102,7 @@ test.describe('For You personalization', () => {
     await expect(card).toBeVisible()
     const likedTitle = await card.locator('h3').innerText()
     await page.getByTestId('swipe-like').click()
-    await expect(page.getByText('2 of 2', { exact: true })).toBeVisible()
+    await expect(page.getByText('1 of 2', { exact: true })).toBeVisible()
     const passedTitle = await card.locator('h3').innerText()
     await page.getByTestId('swipe-pass').click()
 
@@ -110,6 +113,7 @@ test.describe('For You personalization', () => {
     expect(personalBody?.preferences?.liked).toContain(likedTitle)
     expect(personalBody?.preferences?.passed).toContain(passedTitle)
     expect(personalBody?.preferences?.excludedIds?.length).toBeGreaterThan(0)
+    expect(personalBody?.preferences?.categoryIds?.length).toBeGreaterThan(0)
   })
 
   test('an explicit history request stays relevant and grounded in real records', async ({ users }) => {

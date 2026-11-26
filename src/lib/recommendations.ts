@@ -10,6 +10,23 @@
 
 import type { Book } from './books'
 import type { PreferenceSummary } from './preferences'
+import {
+  buildCategoryRecommendationQueries,
+  categoryPreferenceSummary,
+  discoveryCategoryIdsFromText,
+  matchesDiscoveryCategory,
+  normalizeDiscoveryCategoryIds,
+  parseStoredDiscoveryCategoryIds,
+  DEFAULT_DISCOVERY_CATEGORY_IDS,
+  type DiscoveryCategoryId,
+} from './discovery-categories'
+import {
+  DEFAULT_RECOMMENDATION_INTENT,
+  classifyBookRelevance,
+  intentForFocus,
+  isLiteraryStudiesRequest,
+  isShelfEligibleBook,
+} from './book-relevance'
 import { parseBookSnapshot } from './book-parse'
 import { isSameWork } from './swipe-ranking'
 
@@ -21,6 +38,8 @@ export interface ReaderProfile {
   liked: Book[]
   passed: Book[]
   saved: SavedSignal[]
+  /** Explicit shelf choices, loaded from discovery_preferences when available. */
+  categoryIds?: readonly DiscoveryCategoryId[]
 }
 
 export interface RequestFocus {
@@ -28,6 +47,10 @@ export interface RequestFocus {
   nonfiction: boolean
   history: boolean
   academic: boolean
+  /** Only true when the reader explicitly asks to study literature. */
+  literaryStudies: boolean
+  /** Shelves named in this turn; when present they temporarily override saved ones. */
+  categoryIds: readonly DiscoveryCategoryId[]
   /** The latest request, kept for prompt context only. */
   text: string
 }
@@ -42,6 +65,8 @@ const EMPTY_FOCUS: RequestFocus = {
   nonfiction: false,
   history: false,
   academic: false,
+  literaryStudies: false,
+  categoryIds: [],
   text: '',
 }
 
@@ -71,7 +96,7 @@ export async function loadReaderProfile(
   execute: RecordExecutor,
   userId: string,
 ): Promise<ReaderProfile> {
-  const [interactionResult, savedResult] = await Promise.all([
+  const [interactionResult, savedResult, preferenceResult] = await Promise.all([
     execute('records.query', {
       collection: 'book_interactions',
       where: { userId },
@@ -81,6 +106,11 @@ export async function loadReaderProfile(
       collection: 'user_books',
       where: { userId },
       limit: 200,
+    }),
+    execute('records.query', {
+      collection: 'discovery_preferences',
+      where: { userId },
+      limit: 5,
     }),
   ])
 
@@ -97,7 +127,10 @@ export async function loadReaderProfile(
     status: typeof row.status === 'string' ? row.status : 'want',
   }))
 
-  return { liked, passed, saved }
+  const preferenceRow = queryRows(preferenceResult)[0]
+  const categoryIds = parseStoredDiscoveryCategoryIds(preferenceRow?.categoryIds)
+
+  return { liked, passed, saved, categoryIds }
 }
 
 function minimalBook(title: string, index: number): Book {
@@ -141,7 +174,15 @@ export function mergeProfile(
     if (!hasWork(saved, book)) saved.push(book)
   })
 
-  return { liked, passed, saved }
+  return {
+    liked,
+    passed,
+    saved,
+    categoryIds:
+      persisted.categoryIds && persisted.categoryIds.length > 0
+        ? persisted.categoryIds
+        : submitted.categoryIds ?? [],
+  }
 }
 
 /** A specific ask in this conversation takes precedence over the general profile. */
@@ -154,6 +195,7 @@ export function detectRequestFocus(message: string): RequestFocus {
     .replace(/historical\s+fiction/gi, ' ')
     .replace(/science\s+fiction/gi, ' ')
     .replace(/sci[-\s]?fi/gi, ' ')
+  const literaryStudies = isLiteraryStudiesRequest(text)
   const academic = /\b(text\s?books?|workbooks?|coursebooks?|study\s+guides?|exam(?:\s+prep(?:aration)?)?|academic|scholarly|course\s+materials?|reference\s+books?)\b/i.test(
     text,
   )
@@ -170,7 +212,15 @@ export function detectRequestFocus(message: string): RequestFocus {
       nonfictionText,
     )
 
-  return { fiction, nonfiction, history, academic, text }
+  return {
+    fiction,
+    nonfiction,
+    history,
+    academic,
+    literaryStudies,
+    categoryIds: discoveryCategoryIdsFromText(text),
+    text,
+  }
 }
 
 function normalize(value: string): string {
@@ -225,6 +275,44 @@ export function isHistory(book: Book): boolean {
 
 export function hasBehavior(profile: ReaderProfile): boolean {
   return profile.liked.length > 0 || profile.passed.length > 0 || profile.saved.length > 0
+}
+
+function effectiveCategoryIds(profile: ReaderProfile): readonly DiscoveryCategoryId[] {
+  const saved = normalizeDiscoveryCategoryIds(profile.categoryIds ?? [])
+  return saved.length > 0 ? saved : DEFAULT_DISCOVERY_CATEGORY_IDS
+}
+
+/**
+ * The active hard category gate. An explicit shelf in this turn replaces the
+ * saved shelves without changing them. Literary-studies requests have no
+ * reading shelf of their own, so the category gate is lifted while the normal
+ * eligibility and relevance gates remain.
+ */
+export function recommendationCategoryGate(
+  profile: ReaderProfile,
+  focus: RequestFocus,
+): readonly DiscoveryCategoryId[] | null {
+  if (focus.literaryStudies) return null
+  const requested = normalizeDiscoveryCategoryIds(focus.categoryIds)
+  return requested.length > 0 ? requested : effectiveCategoryIds(profile)
+}
+
+/**
+ * Explicit shelves lead the default recommendation hierarchy. A real choice is
+ * a much stronger signal than the balanced fallback set: otherwise a broad
+ * default shelf could outrank the narrower shelves a reader actually picked.
+ * Matching more than one chosen shelf helps a little, not linearly forever.
+ */
+function selectedCategoryScore(book: Book, profile: ReaderProfile): number {
+  const saved = normalizeDiscoveryCategoryIds(profile.categoryIds ?? [])
+  const ids = saved.length > 0 ? saved : DEFAULT_DISCOVERY_CATEGORY_IDS
+  let matches = 0
+  for (const id of ids) {
+    if (matchesDiscoveryCategory(book, id)) matches += 1
+  }
+  if (matches === 0) return 0
+  if (saved.length === 0) return Math.min(8, matches * 4)
+  return 12 + Math.min(3, (matches - 1) * 2)
 }
 
 interface Signals {
@@ -283,24 +371,38 @@ function engagementScore(book: Book): number {
 }
 
 export function scoreCandidate(book: Book, profile: ReaderProfile, focus: RequestFocus): number {
-  // Course materials never surface by default; scholarly nonfiction is only
-  // demoted, because an explicit science or history request may still want it.
-  if (isTextbook(book) && !focus.academic) return -100
+  // Eligibility is checked by rankRecommendations(). Relevance is the separate
+  // default-shelf gate: a valid book about literary theory is not a novel.
+  const relevance = classifyBookRelevance(book, intentForFocus(focus))
+  if (!relevance.relevant) return -100
 
   const academic = isAcademic(book)
   const fiction = isFiction(book)
   const nonfiction = isNonfiction(book)
   const behavior = hasBehavior(profile)
-  let score = engagementScore(book) - (academic && !focus.academic ? 7 : 0)
+  let score =
+    engagementScore(book) +
+    relevance.score -
+    (academic && !focus.academic && !focus.literaryStudies ? 7 : 0)
 
-  // A reader with no history gets a fiction-first shelf, not a textbook shelf.
-  if (!behavior && !focus.nonfiction) score += fiction ? 6 : nonfiction ? -1.5 : 0
-  // A specific request overrides general taste: the penalty for the wrong kind
-  // of book is larger than any positive score accumulated from past swipes.
-  if (focus.fiction) score += fiction ? 5 : nonfiction ? -7 : -4
-  if (focus.nonfiction) score += nonfiction ? 6 : fiction ? -7 : -4
-  if (focus.history) score += isHistory(book) ? 5 : -4
-  if (focus.academic) score += academic ? 6 : -5
+  // Chosen shelves are the strongest general signal. A specific chat request
+  // temporarily overrides them instead of permanently changing saved choices.
+  const explicitFocus =
+    focus.fiction || focus.nonfiction || focus.history || focus.academic || focus.literaryStudies
+  score += explicitFocus ? selectedCategoryScore(book, profile) * 0.25 : selectedCategoryScore(book, profile)
+
+  if (focus.literaryStudies) {
+    // An explicit study request overrides the normal fiction-first bias.
+    score += 4
+  } else {
+    // A reader with no history gets a fiction-first shelf, not a textbook shelf.
+    if (!behavior && !focus.nonfiction) score += fiction ? 6 : nonfiction ? -1.5 : 0
+    // A specific request overrides general taste: the penalty for the wrong kind
+    // of book is larger than any positive score accumulated from past swipes.
+    if (focus.fiction) score += fiction ? 5 : nonfiction ? -7 : -4
+    if (focus.nonfiction) score += nonfiction ? 6 : fiction ? -7 : -4
+    if (focus.history) score += isHistory(book) ? 5 : -4
+  }
 
   if (behavior) {
     const signals = signalsFrom(profile)
@@ -339,10 +441,13 @@ export function rankRecommendations(
   options: RankOptions = {},
 ): Book[] {
   const focus = options.focus ?? EMPTY_FOCUS
+  const intent = intentForFocus(focus)
   const excluded = new Set(options.excludedIds ?? [])
   const interacted = [...profile.liked, ...profile.passed, ...profile.saved]
 
+  const categoryIds = recommendationCategoryGate(profile, focus)
   const ranked = candidates
+    .filter((book) => isShelfEligibleBook(book, intent, categoryIds))
     .filter((book) => !excluded.has(book.sourceId))
     .filter((book) => !interacted.some((past) => isSameWork(past, book)))
     .map((book) => ({ book, score: scoreCandidate(book, profile, focus) }))
@@ -410,16 +515,34 @@ export function profileContext(
   hints: readonly string[] = [],
   focus: RequestFocus = EMPTY_FOCUS,
 ): string {
+  const shelfPolicy = focus.literaryStudies
+    ? 'This request explicitly asks for literary studies, so valid standalone books about literature are relevant for this turn.'
+    : DEFAULT_RECOMMENDATION_INTENT
+
+  const chosen = categoryPreferenceSummary(effectiveCategoryIds(profile))
+  const activeGate = recommendationCategoryGate(profile, focus)
+  const gateLine = activeGate
+    ? `Hard category gate for this turn: only books matching ${categoryPreferenceSummary(activeGate)} may be shown.`
+    : 'This turn explicitly requests literary studies, so the reading-shelf gate is lifted; publication eligibility still applies.'
+  const priority =
+    'General priority: chosen shelves first, then liked and saved books, then passed books as negative signals, then conversation context. A specific request in this turn overrides the chosen shelves for this turn only.'
+
   if (!hasBehavior(profile) && hints.length === 0 && !focus.text) {
     return [
-      'Reader profile: new here. Start with contemporary fiction, literary fiction, fantasy,',
-      'science fiction, mystery, thrillers, romance, historical fiction, and acclaimed novels.',
-      'Accessible nonfiction may appear occasionally. Do not choose textbooks, course materials,',
-      'study aids, or reference books unless the reader asks for them.',
+      `Reader's chosen shelves (highest general priority): ${chosen}.`,
+      gateLine,
+      'Begin with those shelves. If none were chosen, use a balanced mix of contemporary, literary and genre fiction with a little accessible nonfiction.',
+      'Textbooks, course materials, study aids, serials and reference books are never eligible, whatever the request.',
+      `Default shelf policy: ${shelfPolicy}`,
+      priority,
     ].join('\n')
   }
 
   return [
+    `Default shelf policy: ${shelfPolicy}`,
+    priority,
+    `Reader's chosen shelves (highest general priority): ${chosen}`,
+    gateLine,
     'Reader profile from persisted records (strongest signal):',
     `Liked: ${profile.liked.map((book) => book.title).join('; ') || 'none'}`,
     `Passed — avoid similar authors and categories: ${profile.passed.map((book) => book.title).join('; ') || 'none'}`,
@@ -432,12 +555,28 @@ export function profileContext(
 }
 
 /** Model-chosen fallback searches, still real catalogue queries. */
-export function fallbackQueries(focus: RequestFocus): string[] {
-  if (focus.academic) return ['academic textbook', 'scholarly course book']
+export function fallbackQueries(
+  focus: RequestFocus,
+  categoryIds: readonly DiscoveryCategoryId[] = [],
+): string[] {
+  if (focus.literaryStudies) {
+    return ['literary criticism books', 'literary theory books', 'poetry analysis books']
+  }
+  const requested = normalizeDiscoveryCategoryIds(focus.categoryIds)
+  if (requested.length > 0) return buildCategoryRecommendationQueries(requested, 3)
+  if (focus.academic) return ['accessible science nonfiction', 'narrative history']
   if (focus.history) return ['narrative history', 'historical nonfiction']
   if (/\bphilosoph(?:y|ical)\b/i.test(focus.text)) return ['philosophy books', 'ethics and philosophy']
   if (/\bscience\b/i.test(focus.text)) return ['accessible science nonfiction', 'science essays']
   if (focus.nonfiction) return ['accessible nonfiction', 'biography memoir']
   if (focus.fiction) return ['contemporary literary fiction', 'fantasy novels']
-  return ['contemporary literary fiction', 'fantasy novels', 'mystery thriller']
+
+  // No specific request: the reader's saved shelves decide where we look.
+  const selected = buildCategoryRecommendationQueries(
+    normalizeDiscoveryCategoryIds(categoryIds),
+    3,
+  )
+  return selected.length > 0
+    ? selected
+    : ['contemporary literary fiction', 'fantasy novels', 'mystery thriller']
 }

@@ -9,6 +9,13 @@
 
 import type { Book } from '../lib/books'
 import {
+  DEFAULT_INTENT,
+  intentForFocus,
+  isShelfEligibleBook,
+  type RelevanceIntent,
+} from '../lib/book-relevance'
+import type { DiscoveryCategoryId } from '../lib/discovery-categories'
+import {
   fallbackReason,
   groundedReason,
   type ReaderProfile,
@@ -190,6 +197,81 @@ export function applyGroundedReasons<T extends Book>(
 ): (T & { reason: string })[] {
   const reasons = parseGroundedReasons(raw, books)
   return books.map((book) => ({
+    ...book,
+    reason: groundedReason(reasons.get(book.sourceId), book) ?? fallbackReason(book, profile, focus),
+  }))
+}
+
+/**
+ * Read a model selection by Google Books id. Unknown, ineligible, off-category
+ * and duplicate ids are discarded before they can become a recommendation; a
+ * reason-only reply is also accepted as an implicit selection.
+ */
+export function selectedSourceIds(
+  parsed: UnknownRecord | null,
+  candidates: readonly Book[],
+  maxBooks: number,
+  intent: RelevanceIntent = DEFAULT_INTENT,
+  categoryIds?: readonly DiscoveryCategoryId[] | null,
+): string[] {
+  if (!parsed) return []
+  const knownIds = new Set(
+    candidates
+      .filter((book) => isShelfEligibleBook(book, intent, categoryIds))
+      .map((book) => book.sourceId),
+  )
+  const ids: string[] = []
+  const value = parsed.selected ?? parsed.sourceIds ?? parsed.books
+
+  const add = (id: unknown) => {
+    if (typeof id === 'string' && knownIds.has(id) && !ids.includes(id)) ids.push(id)
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (typeof entry === 'string') add(entry)
+      else if (isRecord(entry)) add(entry.sourceId ?? entry.id)
+    }
+  } else if (isRecord(value)) {
+    for (const key of Object.keys(value)) add(key)
+  }
+
+  if (ids.length === 0) {
+    for (const id of reasonsFromObject(parsed, candidates).keys()) add(id)
+  }
+
+  return ids.slice(0, Math.max(0, maxBooks))
+}
+
+/**
+ * Curate only from verified records that pass eligibility, the active relevance
+ * policy, and the current category gate. If the model omits an id or names one
+ * we do not have, fill the shelf from the next ranked candidate.
+ */
+export function curateGroundedBooks<T extends Book>(
+  candidates: readonly T[],
+  parsed: UnknownRecord | null,
+  profile: ReaderProfile,
+  focus: RequestFocus,
+  maxBooks = 8,
+  categoryIds?: readonly DiscoveryCategoryId[] | null,
+): (T & { reason: string })[] {
+  const intent = intentForFocus(focus)
+  const eligible = candidates.filter((book) => isShelfEligibleBook(book, intent, categoryIds))
+  const byId = new Map(eligible.map((book) => [book.sourceId, book] as const))
+  const chosen: T[] = []
+
+  for (const id of selectedSourceIds(parsed, eligible, maxBooks, intent, categoryIds)) {
+    const book = byId.get(id)
+    if (book && !chosen.some((item) => item.sourceId === book.sourceId)) chosen.push(book)
+  }
+  for (const book of eligible) {
+    if (chosen.length >= maxBooks) break
+    if (!chosen.some((item) => item.sourceId === book.sourceId)) chosen.push(book)
+  }
+
+  const reasons = parsed ? reasonsFromObject(parsed, eligible) : new Map<string, string>()
+  return chosen.map((book) => ({
     ...book,
     reason: groundedReason(reasons.get(book.sourceId), book) ?? fallbackReason(book, profile, focus),
   }))

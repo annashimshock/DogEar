@@ -5,11 +5,23 @@
  * module keeps every real record and orders it by four signals: the intent of
  * the query that found it, its position in those results, Google reader
  * engagement when it exists, and the reader's own likes/passes once known.
- * High-confidence course/reference material is removed; borderline educational
- * nonfiction is merely deprioritized so it can still surface as a discovery.
+ * Eligibility is centralized in book-eligibility.ts and the selected-category
+ * gate in discovery-categories.ts: a record must positively qualify as a
+ * standalone book and match a chosen shelf before it is considered here.
+ * Ranking never overrides either gate.
  */
 
 import type { Book, SwipeQuery, SwipeShelf } from './books'
+import { classifyBookEligibility, isEligibleBook } from './book-eligibility'
+import {
+  filterShelfBooks,
+  intentFromText,
+  isShelfEligibleBook,
+} from './book-relevance'
+import {
+  matchesDiscoveryCategory,
+  type DiscoveryCategoryId,
+} from './discovery-categories'
 
 export interface SwipeRankingContext {
   excludedIds?: ReadonlySet<string>
@@ -18,6 +30,8 @@ export interface SwipeRankingContext {
   liked?: readonly Book[]
   passed?: readonly Book[]
   saved?: readonly Book[]
+  /** Reader-selected shelves; a positive match is mandatory when present. */
+  categoryIds?: readonly DiscoveryCategoryId[]
 }
 
 export interface SwipeQueryResults {
@@ -33,52 +47,24 @@ const SHELF_BONUS: Record<SwipeShelf, number> = {
 }
 
 const MAX_PER_QUERY = 8
+const POSITION_WINDOW = 14
+/** A fuzzy nonfiction hit must not crowd out a reader's chosen fiction shelves. */
+const OFF_CATEGORY_PENALTY = 12
 
-const HARD_CATEGORIES = [
-  /^education$/i,
-  /study aids?/i,
-  /test preparation/i,
-  /examination/i,
-  /^reference$/i,
-  /language arts/i,
-  /literary criticism/i,
-  /library science/i,
-  /^computers$/i,
-  /software/i,
-  /technology & engineering/i,
-]
-
-const HARD_TITLE_PATTERNS = [
-  /\btext\s?books?\b/i,
-  /\bworkbooks?\b/i,
-  /\bcoursebooks?\b/i,
-  /\bstudy guides?\b/i,
-  /\bexam(?:ination)?s?\b.*\bprep(?:aration)?\b/i,
-  /\btest prep\b/i,
-  /\bpractice (?:tests?|questions?|problems?)\b/i,
-  /\banswer keys?\b/i,
-  /\b(?:solutions?|instructor'?s?) manual\b/i,
-  /\b(?:technical|user|owner'?s?) manual\b/i,
-  /\bfor dummies\b/i,
-  /\bteaching guide\b/i,
-  /\bschaum'?s outline\b/i,
-]
-
-const SOFT_TITLE_PATTERNS = [
-  /\b(?:edition|volume|manual|handbook|companion|guide|primer|reader)\b/i,
-  /\bintroduction to\b/i,
-  /\bprinciples? of\b/i,
-  /\badvanced\b/i,
-  /\bbeginner\b/i,
-  /\bseries\b/i,
-  /\b(?:journal|proceedings|anthology|essays|research|perspectives)\b/i,
-]
+/**
+ * Google returns a relevance ordering, not a popularity chart. Normalize the
+ * raw result index into 0..1 so every shelf is comparable even when one search
+ * returns many more books than another.
+ */
+export function normalizedSearchPosition(resultIndex: number): number {
+  if (!Number.isFinite(resultIndex) || resultIndex < 0) return 0
+  return Math.max(0, 1 - Math.floor(resultIndex) / POSITION_WINDOW)
+}
 
 /** Books about the market for books are not the books themselves. */
 const META_TITLE_PATTERNS = [/\bbest\s?sellers?\b/i, /\bpopular fiction since\b/i, /\bbookclub\b/i]
 
 const READER_CATEGORIES = /fiction|novels?|memoirs?|biograph|autobiograph|history|nature|science|social science|psychology|travel|cooking|art|music|mythology|comics|graphic novels/i
-const SCHOOL_CATEGORIES = /education|study|reference|language arts|literary criticism|library science|computer|software|technology|engineering|mathematics|law|medicine/i
 const LOW_SIGNAL_CATEGORIES = /juvenile|children|antiques|collectibles|games|activities/i
 
 function normalize(value: string): string {
@@ -95,6 +81,17 @@ function categorySegments(book: Book): string[] {
     .flatMap((category) => category.split(/[,&/]/))
     .map((category) => normalize(category))
     .filter(Boolean)
+}
+
+/** Kept as small compatibility helpers for callers that still ask about a record. */
+export function isSerialPublication(book: Book): boolean {
+  return classifyBookEligibility(book).reasons.some((reason) =>
+    reason.startsWith('serial') || reason === 'catalog-record',
+  )
+}
+
+export function isAcademicPublication(book: Book): boolean {
+  return !isEligibleBook(book)
 }
 
 /** Formatting that describes an edition, not a different work. */
@@ -237,14 +234,6 @@ function matchesQueryTargets(query: SwipeQuery, book: Book): boolean {
   })
 }
 
-function isClearlyUnwanted(book: Book): boolean {
-  const hardCategory = book.categories.some((category) =>
-    HARD_CATEGORIES.some((pattern) => pattern.test(category)),
-  )
-  const hardTitle = HARD_TITLE_PATTERNS.some((pattern) => pattern.test(book.title))
-  return hardCategory || hardTitle
-}
-
 function engagementScore(book: Book): number {
   const count =
     typeof book.ratingsCount === 'number' && Number.isFinite(book.ratingsCount)
@@ -257,12 +246,14 @@ function engagementScore(book: Book): number {
 
   if (count <= 0 && rating === undefined) return 0
 
-  // A logarithmic curve rewards real engagement without letting one runaway
-  // bestseller swamp the rest of the table. Ratings are only a smaller bonus.
-  const popularity = Math.min(9, Math.log10(count + 1) * 1.8)
-  const quality = rating === undefined ? 0 : Math.max(-2, Math.min(6, (rating - 3) * 2.2))
-  const trustworthy = count >= 10 && rating !== undefined && rating >= 4 ? 2 : 0
-  return Math.min(13, popularity + quality + trustworthy)
+  // ratingsCount is the medium-strength signal; a logarithmic curve rewards
+  // genuine reader engagement without letting one runaway title swamp a shelf.
+  // averageRating is deliberately low signal: a 5.0 from six readers must not
+  // beat a 4.3 with thousands of ratings.
+  const popularity = Math.min(8, Math.log10(count + 1) * 1.6)
+  const quality = rating === undefined ? 0 : Math.max(-1, Math.min(1.6, (rating - 3) * 0.8))
+  const trustworthy = count >= 10 && rating !== undefined && rating >= 4 ? 1.5 : 0
+  return Math.min(10, popularity + quality + trustworthy)
 }
 
 function readerFitScore(book: Book): number {
@@ -274,17 +265,11 @@ function readerFitScore(book: Book): number {
 
   const year = Number.parseInt(book.publishedDate.slice(0, 4), 10)
   if (Number.isFinite(year)) {
-    if (year >= 2020) score += 1
-    else if (year >= 2010) score += 0.5
+    // Recency is only a small optional nudge; a great older book still wins.
+    if (year >= 2020) score += 0.5
+    else if (year >= 2010) score += 0.25
   }
   return score
-}
-
-function academicPenalty(book: Book): number {
-  const categories = categorySegments(book)
-  let penalty = categories.some((category) => SCHOOL_CATEGORIES.test(category)) ? 5 : 0
-  if (SOFT_TITLE_PATTERNS.some((pattern) => pattern.test(book.title))) penalty += 2.25
-  return penalty
 }
 
 /**
@@ -359,29 +344,60 @@ function preferenceScore(book: Book, context: SwipeRankingContext): number {
   )
 }
 
-function scoreBook(
+/** Explicit shelves lead the deck; behavior still refines the order. */
+function categoryFitScore(book: Book, query: SwipeQuery, context: SwipeRankingContext): number {
+  const ids = new Set<DiscoveryCategoryId>([
+    ...(context.categoryIds ?? []),
+    ...(query.categoryId ? [query.categoryId] : []),
+  ])
+  let score = 0
+  for (const id of ids) {
+    if (matchesDiscoveryCategory(book, id)) score += 1.8
+  }
+  return Math.min(5.5, score)
+}
+
+/** Final ranking score: search evidence plus record quality and reader taste. */
+function baseScore(
   book: Book,
-  resultIndex: number,
   query: SwipeQuery,
   context: SwipeRankingContext,
 ): number {
-  const relevance = Math.max(0, 14 - resultIndex) * 1.1 * query.weight
   const onTarget = matchesQueryTargets(query, book)
   const shelfBonus = onTarget ? SHELF_BONUS[query.shelf] : 0
   const offTargetPenalty = onTarget ? 0 : 8
   const metaPenalty = META_TITLE_PATTERNS.some((pattern) => pattern.test(book.title)) ? 6 : 0
+  const selectedIds = new Set<DiscoveryCategoryId>([
+    ...(context.categoryIds ?? []),
+    ...(query.categoryId ? [query.categoryId] : []),
+  ])
+  const offCategoryPenalty =
+    selectedIds.size > 0 &&
+    ![...selectedIds].some((id) => matchesDiscoveryCategory(book, id))
+      ? OFF_CATEGORY_PENALTY
+      : 0
 
   return (
-    relevance +
     2 * query.weight +
     shelfBonus +
     engagementScore(book) +
     readerFitScore(book) +
-    preferenceScore(book, context) -
-    academicPenalty(book) -
+    preferenceScore(book, context) +
+    categoryFitScore(book, query, context) -
     offTargetPenalty -
+    offCategoryPenalty -
     metaPenalty
   )
+}
+
+/** A work's place in several relevant searches is evidence, not a volume count. */
+function positionBonus(positionScores: readonly number[]): number {
+  if (positionScores.length === 0) return 0
+  const sorted = [...positionScores].sort((a, b) => b - a)
+  const primary = sorted[0] * 6
+  const supporting = Math.min(3, sorted.slice(1, 3).reduce((sum, value) => sum + value, 0) * 1.5)
+  const repetition = Math.min(2.4, Math.max(0, sorted.length - 1) * 0.8)
+  return primary + supporting + repetition
 }
 
 /**
@@ -400,39 +416,73 @@ export function rankSwipeBooks(
     ...(context.passed ?? []),
     ...(context.saved ?? []),
   ]
-  const candidates: { book: Book; score: number; queryKey: string }[] = []
+  interface Candidate {
+    book: Book
+    baseScore: number
+    queryKey: string
+    /** One entry per distinct query, never per duplicate edition. */
+    positionScores: number[]
+  }
+  const candidates: Candidate[] = []
+  const queryCategoryIds = [
+    ...new Set(inputs.flatMap(({ query }) => (query.categoryId ? [query.categoryId] : []))),
+  ]
+  const hardCategoryIds =
+    context.categoryIds && context.categoryIds.length > 0
+      ? context.categoryIds
+      : queryCategoryIds.length > 0
+        ? queryCategoryIds
+        : undefined
 
   inputs.forEach(({ query, books }, groupIndex) => {
     const queryKey = `${groupIndex}:${query.query}`
+    const intent = intentFromText(query.query)
+    // Multiple editions of one work inside a single search are one placement.
+    const countedInQuery = new Set<number>()
+
     books.forEach((book, resultIndex) => {
       if (!book.sourceId || excluded?.has(book.sourceId)) return
+      if (!isShelfEligibleBook(book, intent, hardCategoryIds)) return
       if (interactedWorks.some((interacted) => isSameWork(interacted, book))) return
-      if (isClearlyUnwanted(book)) return
       if (seenWorks.some((seen) => isSameWork(seen, book))) return
       // Front-table searches are exact curation; fuzzy neighbours belong in
       // the later genre/discovery batches, not at the top of a new stack.
       if (query.targets?.length && !matchesQueryTargets(query, book)) return
 
-      const score = scoreBook(book, resultIndex, query, context)
-      const existing = candidates.find((candidate) => isSameWork(candidate.book, book))
-      if (!existing) {
-        candidates.push({ book, score, queryKey })
-        return
+      const score = baseScore(book, query, context)
+      let candidateIndex = candidates.findIndex((candidate) => isSameWork(candidate.book, book))
+      if (candidateIndex < 0) {
+        candidates.push({ book, baseScore: score, queryKey, positionScores: [] })
+        candidateIndex = candidates.length - 1
       }
+      const candidate = candidates[candidateIndex]
 
-      // One work, possibly many Google editions. Keep the best placement and
-      // the best record independently so a weaker edition cannot demote it.
-      if (score > existing.score) {
-        existing.score = score
-        existing.queryKey = queryKey
+      // Keep the strongest placement and the strongest record independently so
+      // a weaker edition cannot demote a work found near the top of a shelf.
+      if (score > candidate.baseScore) {
+        candidate.baseScore = score
+        candidate.queryKey = queryKey
       }
-      if (isStrongerRecord(book, existing.book)) existing.book = book
+      if (isStrongerRecord(book, candidate.book)) candidate.book = book
+      if (!countedInQuery.has(candidateIndex)) {
+        countedInQuery.add(candidateIndex)
+        // The worker may have removed ineligible records before this point, so
+        // prefer the absolute Google position carried on the record over the
+        // compacted array index. Hand-built test records still use their index.
+        const originalPosition = book.googleResultIndex ?? resultIndex
+        candidate.positionScores.push(
+          normalizedSearchPosition(originalPosition) * query.weight,
+        )
+      }
     })
   })
 
-  const sorted = candidates.sort(
-    (a, b) => b.score - a.score || a.book.title.localeCompare(b.book.title),
-  )
+  const sorted = candidates
+    .map((candidate) => ({
+      ...candidate,
+      score: candidate.baseScore + positionBonus(candidate.positionScores),
+    }))
+    .sort((a, b) => b.score - a.score || a.book.title.localeCompare(b.book.title))
 
   // Keep several shelves in play: no single query can fill the whole stack.
   const perQuery = new Map<string, number>()
@@ -451,9 +501,13 @@ export function rankSwipeBooks(
  * Remember every edition fetched for a batch, not just the one shown. Later
  * batches then cannot reintroduce a work from an earlier search.
  */
-export function registerSwipeWorks(seen: readonly Book[], fetched: readonly Book[]): Book[] {
-  const registered = [...seen]
-  for (const book of fetched) {
+export function registerSwipeWorks(
+  seen: readonly Book[],
+  fetched: readonly Book[],
+  categoryIds?: readonly DiscoveryCategoryId[],
+): Book[] {
+  const registered = filterShelfBooks(seen, categoryIds)
+  for (const book of filterShelfBooks(fetched, categoryIds)) {
     if (!book.sourceId) continue
     const index = registered.findIndex((existing) => isSameWork(existing, book))
     if (index < 0) registered.push(book)
@@ -467,9 +521,13 @@ export function registerSwipeWorks(seen: readonly Book[], fetched: readonly Book
  * pool. Replacing a duplicate in place keeps the existing rank order while
  * still showing the strongest record for that work.
  */
-export function mergeSwipeBooks(current: readonly Book[], incoming: readonly Book[]): Book[] {
-  const merged = [...current]
-  for (const book of incoming) {
+export function mergeSwipeBooks(
+  current: readonly Book[],
+  incoming: readonly Book[],
+  categoryIds?: readonly DiscoveryCategoryId[],
+): Book[] {
+  const merged = filterShelfBooks(current, categoryIds)
+  for (const book of filterShelfBooks(incoming, categoryIds)) {
     const index = merged.findIndex((existing) => isSameWork(existing, book))
     if (index < 0) merged.push(book)
     else if (isStrongerRecord(book, merged[index])) merged[index] = book
@@ -492,12 +550,19 @@ export function applySwipeBatch(
   results: readonly SwipeQueryResults[],
   context: Omit<SwipeRankingContext, 'seenWorks'> = {},
 ): SwipeQueueState {
-  const fetched = results.flatMap(({ books }) => books)
+  // Eligibility and relevance are both checked again here, not only by the
+  // worker, so a stronger edition of a rejected record can never replace a
+  // queued book later.
+  const eligibleResults = results.map(({ query, books }) => ({
+    query,
+    books: filterShelfBooks(books, context.categoryIds, intentFromText(query.query)),
+  }))
+  const fetched = eligibleResults.flatMap(({ books }) => books)
   // Rank against earlier batches only; registering this batch first would hide
   // the very books it just fetched.
-  const fresh = rankSwipeBooks(results, { ...context, seenWorks: state.seenWorks })
-  const seenWorks = registerSwipeWorks(state.seenWorks, fetched)
-  const queue = mergeSwipeBooks(state.queue, fresh)
+  const fresh = rankSwipeBooks(eligibleResults, { ...context, seenWorks: state.seenWorks })
+  const seenWorks = registerSwipeWorks(state.seenWorks, fetched, context.categoryIds)
+  const queue = mergeSwipeBooks(state.queue, fresh, context.categoryIds)
 
   // A later batch can carry a stronger edition of a work already queued. The
   // rank still excludes it as a duplicate, but the reader sees the best record.

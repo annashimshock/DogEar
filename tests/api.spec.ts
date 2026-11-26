@@ -15,4 +15,22 @@ test.describe('API tests', () => {
     await page.waitForSelector('[data-testid="app-navigation"]', { timeout: 15000 })
     // If the app loaded and connected, the WS endpoint works
   })
+
+  test('book search returns paged, eligible standalone records', async ({ request }) => {
+    const res = await request.get('/api/books/search?q=literary%20fiction&limit=10&startIndex=5')
+    expect(res.ok()).toBeTruthy()
+
+    const data = await res.json()
+    expect(typeof data.totalItems).toBe('number')
+    expect(Array.isArray(data.books)).toBe(true)
+    expect(data.eligibleCount).toBeGreaterThanOrEqual(data.books.length)
+    expect(data.relevantCount).toBe(data.books.length)
+    for (const book of data.books) {
+      expect(book.printType).toBe('BOOK')
+      expect(book.title).toBeTruthy()
+      expect(book.publishedDate).toMatch(/^\d{4}/)
+      expect(book.googleResultIndex).toBeGreaterThanOrEqual(5)
+      expect(book.categories.join(' ')).not.toMatch(/periodicals?|journals?|magazines?/i)
+    }
+  })
 })

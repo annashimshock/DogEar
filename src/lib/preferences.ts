@@ -5,6 +5,7 @@
  */
 
 import type { SavedBook } from './books'
+import { normalizeDiscoveryCategoryIds, type DiscoveryCategoryId } from './discovery-categories'
 import type { BookInteraction } from './useBookInteractions'
 
 export interface PreferenceSummary {
@@ -18,6 +19,8 @@ export interface PreferenceSummary {
   excludedIds: string[]
   /** Recent requests from the reader's own conversations. */
   conversationHints: string[]
+  /** Explicitly chosen shelves from persisted discovery preferences. */
+  categoryIds?: DiscoveryCategoryId[]
 }
 
 function unique(values: string[], limit: number): string[] {
@@ -29,6 +32,7 @@ export function buildPreferenceSummary(
   savedBooks: SavedBook[],
   interactions: BookInteraction[],
   recentRequests: string[] = [],
+  categoryIds: readonly DiscoveryCategoryId[] = [],
 ): PreferenceSummary {
   const likedBooks = interactions.filter((item) => item.action === 'like')
   const passedBooks = interactions.filter((item) => item.action === 'pass')
@@ -45,5 +49,6 @@ export function buildPreferenceSummary(
     categories: unique(enjoyed.flatMap((book) => book.categories), 12),
     excludedIds: unique([...savedBooks, ...interactions].map((book) => book.sourceId), 100),
     conversationHints: unique(recentRequests.map((text) => text.slice(0, 200)), 8),
+    categoryIds: normalizeDiscoveryCategoryIds(categoryIds),
   }
 }

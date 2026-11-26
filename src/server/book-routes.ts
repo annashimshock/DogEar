@@ -23,11 +23,19 @@ import { recordRoomStub } from './record-room.js'
 import { deriveChatTitle } from '../ai/chat-title.js'
 import type { PreferenceSummary } from '../lib/preferences'
 import {
-  applyGroundedReasons,
+  categoryPreferenceSummary,
+  discoveryCategoryIdsFromText,
+  normalizeDiscoveryCategoryIds,
+  DEFAULT_DISCOVERY_CATEGORY_IDS,
+  type DiscoveryCategoryId,
+} from '../lib/discovery-categories.js'
+import {
+  curateGroundedBooks,
   JSON_ONLY_RETRY,
   parseJsonObject,
   reasonsFromObject,
   responseText,
+  selectedSourceIds,
   suggestionFromObject,
 } from './book-notes.js'
 import {
@@ -38,21 +46,34 @@ import {
   mergeProfile,
   profileContext,
   rankRecommendations,
+  recommendationCategoryGate,
   type ReaderProfile,
   type RequestFocus,
 } from '../lib/recommendations.js'
+import { filterEligibleBooks } from '../lib/book-eligibility.js'
+import {
+  DEFAULT_RECOMMENDATION_INTENT,
+  filterShelfBooks,
+  intentForFocus,
+  intentFromText,
+  isLiteraryStudiesRequest,
+} from '../lib/book-relevance.js'
 
 interface GoogleBook {
   id: string
   volumeInfo?: {
     title?: string
+    subtitle?: string
     authors?: string[]
     description?: string
     categories?: string[]
+    mainCategory?: string
     publishedDate?: string
     publisher?: string
     language?: string
     pageCount?: number
+    printType?: string
+    industryIdentifiers?: { type?: string; identifier?: string }[]
     averageRating?: number
     ratingsCount?: number
     imageLinks?: {
@@ -80,6 +101,12 @@ export interface BookResult {
   publisher?: string
   language?: string
   pageCount?: number
+  /** Absolute Google result position, kept through eligibility/relevance filtering. */
+  googleResultIndex?: number
+  subtitle?: string
+  printType?: string
+  mainCategory?: string
+  industryIdentifiers?: { type: string; identifier: string }[]
 }
 
 export interface RecommendedBook extends BookResult {
@@ -95,7 +122,7 @@ function finiteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
-function toBook(item: GoogleBook): BookResult {
+function toBook(item: GoogleBook, resultIndex?: number): BookResult {
   const info = item.volumeInfo ?? {}
   const thumbnail = info.imageLinks?.thumbnail
 
@@ -113,6 +140,17 @@ function toBook(item: GoogleBook): BookResult {
     publisher: typeof info.publisher === 'string' ? info.publisher : undefined,
     language: typeof info.language === 'string' ? info.language : undefined,
     pageCount: finiteNumber(info.pageCount),
+    googleResultIndex:
+      typeof resultIndex === 'number' && Number.isFinite(resultIndex) ? resultIndex : undefined,
+    subtitle: typeof info.subtitle === 'string' ? info.subtitle : undefined,
+    printType: typeof info.printType === 'string' ? info.printType : undefined,
+    mainCategory: typeof info.mainCategory === 'string' ? info.mainCategory : undefined,
+    industryIdentifiers: (info.industryIdentifiers ?? [])
+      .filter(
+        (entry): entry is { type: string; identifier: string } =>
+          typeof entry.type === 'string' && typeof entry.identifier === 'string',
+      )
+      .map((entry) => ({ type: entry.type, identifier: entry.identifier })),
   }
 }
 
@@ -129,11 +167,13 @@ async function googleSearch(
   query: string,
   limit: number,
   apiKey: string,
+  startIndex = 0,
 ): Promise<{ books: BookResult[]; totalItems: number }> {
   const url = new URL('https://www.googleapis.com/books/v1/volumes')
   url.searchParams.set('q', query)
   url.searchParams.set('key', apiKey)
   url.searchParams.set('maxResults', String(limit))
+  if (startIndex > 0) url.searchParams.set('startIndex', String(startIndex))
   url.searchParams.set('printType', 'books')
 
   const response = await fetch(url)
@@ -145,7 +185,7 @@ async function googleSearch(
 
   const data = (await response.json()) as GoogleBooksResponse
   return {
-    books: (data.items ?? []).map(toBook),
+    books: (data.items ?? []).map((item, index) => toBook(item, startIndex + index)),
     totalItems: data.totalItems ?? 0,
   }
 }
@@ -183,6 +223,7 @@ function readPreferences(value: unknown, userId: string): PreferenceSummary {
     categories: strings(raw.categories, 12),
     excludedIds: strings(raw.excludedIds, 100),
     conversationHints: strings(raw.conversationHints, 8).map((text) => text.slice(0, 200)),
+    categoryIds: normalizeDiscoveryCategoryIds(raw.categoryIds),
   }
 }
 
@@ -251,24 +292,34 @@ function warnUnusableJson(kind: string, fallback: string, result: GeneratedJson)
 }
 
 /**
- * Second pass: explain the actual records we found. The first pass chooses
- * searches before any books are known, so reasons written there would be guesses.
+ * Second pass: choose from the eligible Google Books records we actually found
+ * and explain that selection. The first pass only chooses searches before any
+ * books are known, so titles written there would be guesses.
  */
-async function explainGroundedBooks(
+async function curateGroundedBooksFromModel(
   env: Env,
   token: string,
-  books: readonly BookResult[],
+  candidates: readonly BookResult[],
   profile: ReaderProfile,
   hints: readonly string[],
   focus: RequestFocus,
-): Promise<(string | undefined)[]> {
-  if (books.length === 0) return []
+  maxBooks: number,
+  categoryIds?: readonly DiscoveryCategoryId[] | null,
+): Promise<(BookResult & { reason: string })[]> {
+  if (candidates.length === 0) return []
 
   const factory = createDeepSpaceAI(env, 'anthropic', { authToken: token })
+  const intent = intentForFocus(focus)
+  const policy = intent.statement
+  const categoryPolicy = categoryIds?.length
+    ? `Hard category gate for this turn: choose only books matching ${categoryPreferenceSummary(categoryIds)}. Other shelves are forbidden even if they look interesting.`
+    : 'This turn explicitly asks for literary studies; the reading-shelf gate is lifted, but publication eligibility still applies.'
   const basePrompt = [
-    'Real Google Books records:',
+    `Relevance policy for this turn: ${policy}`,
+    categoryPolicy,
+    'Verified standalone Google Books records that already pass DogEar’s relevance gate. These are the ONLY books you may choose:',
     JSON.stringify(
-      books.map((book) => ({
+      candidates.map((book) => ({
         sourceId: book.sourceId,
         title: book.title,
         authors: book.authors,
@@ -276,8 +327,10 @@ async function explainGroundedBooks(
       })),
     ),
     profileContext(profile, hints, focus),
-    'Reply with JSON only: {"reasons":{"<sourceId>":"one grounded sentence",...}}.',
-    'Use every sourceId exactly once. Each reason must name its book and connect it to a real author, category, or the reader request above. No generic praise.',
+    `Reply with JSON only: {"selected":["<sourceId>",...],"reasons":{"<sourceId>":"one grounded sentence",...}}.`,
+    `Choose at most ${maxBooks} records. Every selected id must appear exactly as written in the list above; unknown ids are ignored and DogEar fills the shelf from another eligible record. Never invent a book, author, category or sourceId.`,
+    'Never choose a book about literary criticism, theory, analysis or commentary unless this turn explicitly asks for that subject.',
+    'Each reason must name its book and connect it to a real author, category, or the reader request above. No generic praise.',
   ].join('\n')
 
   try {
@@ -285,25 +338,26 @@ async function explainGroundedBooks(
       async (suffix) =>
         generateText({
           model: factory('claude-haiku-5-5'),
-          maxOutputTokens: 700,
+          maxOutputTokens: 900,
           system:
-            'You write short, concrete book notes for DogEar. Use only the record fields you are given. Never describe plot events or invent awards, metadata, or details that are not in the record.',
+            `You curate a short shelf for DogEar from a supplied Google Books catalogue list. Relevance policy: ${policy} Use only the record fields you are given. Never describe plot events or invent awards, metadata, or details that are not in the record.`,
           prompt: suffix ? `${basePrompt}\n${suffix}` : basePrompt,
         }),
-      (object) => reasonsFromObject(object, books).size > 0,
+      (object) =>
+        selectedSourceIds(object, candidates, maxBooks, intent).length > 0 ||
+        reasonsFromObject(object, candidates).size > 0,
     )
     if (!generated.object) {
-      warnUnusableJson('Book note generation', 'grounded fallbacks', generated)
-      return []
+      warnUnusableJson('Book selection', 'ranked eligible candidates', generated)
+      return curateGroundedBooks(candidates, null, profile, focus, maxBooks, categoryIds)
     }
-    const reasons = reasonsFromObject(generated.object, books)
-    return books.map((book) => reasons.get(book.sourceId))
+    return curateGroundedBooks(candidates, generated.object, profile, focus, maxBooks, categoryIds)
   } catch (error) {
-    console.warn('Book note generation unavailable; using grounded fallbacks:', {
+    console.warn('Book selection unavailable; using ranked eligible candidates:', {
       name: error instanceof Error ? error.name : 'UnknownError',
       message: error instanceof Error ? error.message.slice(0, 200) : 'Unknown failure',
     })
-    return []
+    return curateGroundedBooks(candidates, null, profile, focus, maxBooks, categoryIds)
   }
 }
 
@@ -333,7 +387,22 @@ async function recommendGrounded({
   const suggestion = generated.object ? suggestionFromObject(generated.object) : null
   if (!suggestion) warnUnusableJson('Bookseller response', 'catalogue fallbacks', generated)
 
-  const queries = suggestion?.queries.length ? suggestion.queries : fallbackQueries(focus)
+  const intent = intentForFocus(focus)
+  const suggestedQueries = suggestion?.queries ?? []
+  // The model only proposes searches. Deterministic relevance decides which of
+  // those searches are allowed before any candidate reaches the ranking stage.
+  const categoryIds = recommendationCategoryGate(profile, focus)
+  const allowedQueries = intent.allowLiteraryStudies
+    ? suggestedQueries
+    : suggestedQueries.filter((query) => {
+        if (isLiteraryStudiesRequest(query)) return false
+        if (!categoryIds) return true
+        const requested = discoveryCategoryIdsFromText(query)
+        return requested.some((id) => categoryIds.includes(id))
+      })
+  const queries = allowedQueries.length
+    ? allowedQueries
+    : fallbackQueries(focus, profile.categoryIds ?? [])
   const found = await Promise.all(
     queries.map(async (query) => {
       try {
@@ -344,20 +413,23 @@ async function recommendGrounded({
     }),
   )
 
-  const ranked = rankRecommendations(found.flat(), profile, {
+  // Hard eligibility/relevance/category gate before ranking and before the
+  // model sees its pool. A model cannot widen the pool by naming another book.
+  const relevant = filterShelfBooks(found.flat(), categoryIds, intent)
+  const ranked = rankRecommendations(relevant, profile, {
     maxBooks,
     focus,
     excludedIds,
   })
-  const notes = await explainGroundedBooks(env, token, ranked, profile, hints, focus)
-  const notesBySourceId = new Map(
-    ranked.map((book, index) => [book.sourceId, notes[index]] as const).filter(([, note]) => !!note),
-  )
-  const books = applyGroundedReasons(
+  const books = await curateGroundedBooksFromModel(
+    env,
+    token,
     ranked,
-    JSON.stringify({ reasons: Object.fromEntries(notesBySourceId) }),
     profile,
+    hints,
     focus,
+    maxBooks,
+    categoryIds,
   )
 
   return {
@@ -368,13 +440,15 @@ async function recommendGrounded({
 
 const BOOKSELLER_BASE = [
   'You are the bookseller at DogEar, a warm independent bookstore.',
-  'For readers without a specific request, favor fiction: contemporary and literary fiction, fantasy, science fiction, mystery, thrillers, romance, historical fiction, and acclaimed novels.',
-  'Historical fiction is fiction. Popular, accessible nonfiction may appear occasionally, but textbooks, course materials, study aids, and reference books are off the shelves unless explicitly requested.',
+  'For readers without a specific request, favor contemporary novels, literary fiction, historical fiction, fantasy, science fiction, mystery, thriller, romance, horror, short-story collections, poetry collections, biography, memoir, accessible history and popular science.',
+  DEFAULT_RECOMMENDATION_INTENT,
+  'Historical fiction is fiction. Textbooks, course materials, study aids, serials and reference books are never eligible. A reader who explicitly asks for literary criticism, theory or analysis may receive those standalone books for that turn only.',
   'Never name a specific title or author in your reply — describe moods and themes instead; the app supplies real titles from Google Books.',
   'Reply with JSON only, shaped exactly as:',
   '{"reply":"two or three warm sentences responding to the reader","queries":["google books search query","another query","a third query"]}',
   'Queries must be broad catalogue searches (for example "literary fiction grief friendship"), not title lookups.',
-  'A specific request in the current conversation overrides the reader’s general taste. Use the persisted reader profile as the strongest general signal.',
+  'When there is no specific request, begin with the reader’s chosen shelves, then their liked and saved books, and avoid books like their passes.',
+  'A specific request in the current conversation overrides the chosen shelves for this turn only; it never changes the saved preferences.',
 ].join(' ')
 
 interface RecommendBody {
@@ -397,10 +471,37 @@ export function registerBookRoutes(app: Hono<AppContext>): void {
     const limit = Number.isFinite(requestedLimit)
       ? Math.min(40, Math.max(1, Math.floor(requestedLimit)))
       : 12
+    const requestedOffset = Number(c.req.query('startIndex') ?? 0)
+    const startIndex = Number.isFinite(requestedOffset)
+      ? Math.min(1000, Math.max(0, Math.floor(requestedOffset)))
+      : 0
 
     try {
-      const { books, totalItems } = await googleSearch(query, limit, c.env.GOOGLE_BOOKS_API_KEY)
-      return c.json({ totalItems, books })
+      const { books, totalItems } = await googleSearch(
+        query,
+        limit,
+        c.env.GOOGLE_BOOKS_API_KEY,
+        startIndex,
+      )
+      // Eligibility is authoritative here: no ineligible record ever crosses
+      // the worker boundary. Searches also enforce reading relevance and at
+      // least one active shelf; only an explicit literary-studies request lifts
+      // the shelf gate, and it still keeps the eligibility gate.
+      const eligible = filterEligibleBooks(books)
+      const intent = intentFromText(query)
+      const requestedCategories = c.req.query('categories')
+      const categoryIds = intent.allowLiteraryStudies
+        ? null
+        : requestedCategories === undefined
+          ? DEFAULT_DISCOVERY_CATEGORY_IDS
+          : normalizeDiscoveryCategoryIds(requestedCategories.split(','))
+      const visible = filterShelfBooks(books, categoryIds, intent)
+      return c.json({
+        totalItems,
+        eligibleCount: eligible.length,
+        relevantCount: visible.length,
+        books: visible,
+      })
     } catch (error) {
       if (error instanceof GoogleBooksError) {
         console.error('Google Books search failed:', error)
